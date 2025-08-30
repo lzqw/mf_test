@@ -17,7 +17,10 @@ from relax.algorithm.rf import RF
 from relax.algorithm.rf2 import RF2
 from relax.algorithm.mf import MF
 from relax.algorithm.mf2 import MF2
+from relax.algorithm.mfsac import MFSAC
+
 from relax.buffer import TreeBuffer
+
 from relax.network.sac import create_sac_net
 from relax.network.dacer import create_dacer_net
 from relax.network.qsm import create_qsm_net
@@ -28,6 +31,8 @@ from relax.network.rf2 import create_rf2_net
 from relax.network.mf import create_mf_net
 from relax.network.mf2 import create_mf2_net
 from relax.network.qvpo import create_qvpo_net
+from relax.network.mfsac import create_mfsac_net
+
 from relax.trainer.off_policy import OffPolicyTrainer
 from relax.env import create_env, create_vector_env
 from relax.utils.experience import Experience, ObsActionPair
@@ -193,6 +198,21 @@ if __name__ == "__main__":
                                           num_particles=args.num_particles,
                                           noise_scale=args.noise_scale)
         algorithm = QVPO(agent, params, lr=args.lr, alpha_lr=args.alpha_lr, delay_alpha_update=args.delay_alpha_update)
+        
+    elif args.alg == 'mfsac':
+        def mish(x: jax.Array):
+            return x * jnp.tanh(jax.nn.softplus(x))
+        agent, params = create_mfsac_net(init_network_key, obs_dim, act_dim, hidden_sizes, diffusion_hidden_sizes, mish,
+                                          num_timesteps=args.diffusion_steps, 
+                                          num_timesteps_test=args.diffusion_steps_test,
+                                          num_particles=args.num_particles, 
+                                          noise_scale=args.noise_scale,
+                                          target_entropy_scale=args.target_entropy_scale)
+        algorithm = MFSAC(agent, params, lr=args.lr, alpha_lr=args.alpha_lr, 
+                           delay_alpha_update=args.delay_alpha_update,
+                             lr_schedule_end=args.lr_schedule_end,
+                             use_ema=args.use_ema_policy)
+        
     else:
         raise ValueError(f"Invalid algorithm {args.alg}!")
 

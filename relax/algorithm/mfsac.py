@@ -27,7 +27,7 @@ class Diffv2TrainState(NamedTuple):
     running_mean: float
     running_std: float
 
-class MF(Algorithm):
+class MFSAC(Algorithm):
 
     def __init__(
         self,
@@ -89,9 +89,10 @@ class MF(Algorithm):
             step = state.step
             running_mean = state.running_mean
             running_std = state.running_std
-            next_eval_key, flow_noise_key, r_key, mask_key, t_key = jax.random.split(
-                key, 5)
-
+            # next_eval_key, flow_noise_key, r_key, mask_key, t_key = jax.random.split(
+            #     key, 5)
+            next_eval_key,  flow_noise_key, r_key, mask_key, t_key, action_sample_key= jax.random.split(
+                key, 6)
             reward *= self.reward_scale
 
             def get_min_q(s, a):
@@ -118,9 +119,26 @@ class MF(Algorithm):
             q1_params = optax.apply_updates(q1_params, q1_update)
             q2_params = optax.apply_updates(q2_params, q2_update)
 
-            action = self.agent.get_action(next_eval_key, (policy_params, log_alpha, q1_params, q2_params), obs)
+            #sample at from uniform,gaussian or old policy
+            action_sample_key = jax.random.split(action_sample_key, self.agent.num_particles)
+            sample_type="uniform"
+            if sample_type=="gaussian":
+                at = jax.random.normal(action_sample_key, next_action.shape)
+                at = at.clip(-1, 1)
+            elif sample_type=="uniform":
+                at = jax.vmap(lambda key: jax.random.uniform(key, action.shape, minval=-1, maxval=1))(action_sample_key)
+            else:
+                raise NotImplementedError
+            obs_expanded = jnp.repeat(obs[jnp.newaxis, ...], self.agent.num_particles, axis=0)
+            
+            # Now call the function with the correctly shaped obs
+            qs = get_min_q(obs_expanded, at)
+            q_best_ind = jnp.argmax(qs, axis=0, keepdims=True)
+            at = jnp.take_along_axis(at, q_best_ind[..., None], axis=0).squeeze(axis=0)
+
             def policy_loss_fn(policy_params) -> jax.Array:
-                q_min = get_min_q(obs, action)
+                
+                q_min = get_min_q(obs, at)
                 q_mean, q_std = q_min.mean(), q_min.std()
                 norm_q = q_min - running_mean / running_std
                 scaled_q = norm_q.clip(-3., 3.) / jnp.exp(log_alpha)
@@ -139,7 +157,7 @@ class MF(Algorithm):
                 t_final = jnp.where(mask, r0, t_swap)
 
                 loss = self.agent.flow.weighted_p_loss(flow_noise_key, q_weights, denoiser, r_final, t_final,
-                                                            jax.lax.stop_gradient(action))
+                                                            jax.lax.stop_gradient(at))
                 return loss, (q_weights, scaled_q, q_mean, q_std)
 
             (total_loss, (q_weights, scaled_q, q_mean, q_std)), policy_grads = jax.value_and_grad(policy_loss_fn, has_aux=True)(policy_params)
