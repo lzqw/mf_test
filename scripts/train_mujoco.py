@@ -19,6 +19,12 @@ from relax.algorithm.mf import MF
 from relax.algorithm.mf2 import MF2
 from relax.algorithm.mfsac import MFSAC
 
+
+#mf_r stands for basic reweighting method for Mean Flow SAC
+from relax.algorithm.mf_r import MF_R
+
+#mf_r2 stands for advanced reweighting method for Mean Flow SAC, which uses time related constant for reweighting
+
 from relax.buffer import TreeBuffer
 
 from relax.network.sac import create_sac_net
@@ -33,6 +39,8 @@ from relax.network.mf2 import create_mf2_net
 from relax.network.qvpo import create_qvpo_net
 from relax.network.mfsac import create_mfsac_net
 
+from relax.network.mf_r import create_mfr_net
+
 from relax.trainer.off_policy import OffPolicyTrainer
 from relax.env import create_env, create_vector_env
 from relax.utils.experience import Experience, ObsActionPair
@@ -42,13 +50,13 @@ from relax.utils.log_diff import log_git_details
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--alg", type=str, default="sdac")
+    parser.add_argument("--alg", type=str, default="mf_r")
     parser.add_argument("--env", type=str, default="Ant-v4")
     parser.add_argument("--suffix", type=str, default="test_use_atp1")
     parser.add_argument("--num_vec_envs", type=int, default=5)
     parser.add_argument("--hidden_num", type=int, default=3)
     parser.add_argument("--hidden_dim", type=int, default=256)
-    parser.add_argument("--diffusion_steps", type=int, default=20)
+    parser.add_argument("--diffusion_steps", type=int, default=20)  #SET 1 FOT MF BASED ALGORITHM
     parser.add_argument("--diffusion_steps_test", type=int, default=20)
     parser.add_argument("--diffusion_hidden_dim", type=int, default=256)
     parser.add_argument("--start_step", type=int, default=int(3e4)) # other envs 3e4
@@ -62,7 +70,7 @@ if __name__ == "__main__":
     parser.add_argument("--noise_scale", type=float, default=0.1)
     parser.add_argument("--target_entropy_scale", type=float, default=1.5)
     parser.add_argument("--replay_buffer_size", type=int, default=int(1e6))
-    parser.add_argument("--debug", action='store_true', default=False)
+    parser.add_argument("--debug", default=False)
     parser.add_argument("--use_ema_policy", default=True, action="store_true")
     args = parser.parse_args()
 
@@ -96,11 +104,11 @@ if __name__ == "__main__":
         def mish(x: jax.Array):
             return x * jnp.tanh(jax.nn.softplus(x))
         agent, params = create_sdac_net(init_network_key, obs_dim, act_dim, hidden_sizes, diffusion_hidden_sizes, mish,
-                                          num_timesteps=args.diffusion_steps, 
-                                          num_particles=args.num_particles, 
+                                          num_timesteps=args.diffusion_steps,
+                                          num_particles=args.num_particles,
                                           noise_scale=args.noise_scale,
                                           target_entropy_scale=args.target_entropy_scale)
-        algorithm = SDAC(agent, params, lr=args.lr, alpha_lr=args.alpha_lr, 
+        algorithm = SDAC(agent, params, lr=args.lr, alpha_lr=args.alpha_lr,
                            delay_alpha_update=args.delay_alpha_update,
                              lr_schedule_end=args.lr_schedule_end,
                              use_ema=args.use_ema_policy)
@@ -108,12 +116,12 @@ if __name__ == "__main__":
         def mish(x: jax.Array):
             return x * jnp.tanh(jax.nn.softplus(x))
         agent, params = create_rf_net(init_network_key, obs_dim, act_dim, hidden_sizes, diffusion_hidden_sizes, mish,
-                                          num_timesteps=args.diffusion_steps, 
+                                          num_timesteps=args.diffusion_steps,
                                           num_timesteps_test=args.diffusion_steps_test,
-                                          num_particles=args.num_particles, 
+                                          num_particles=args.num_particles,
                                           noise_scale=args.noise_scale,
                                           target_entropy_scale=args.target_entropy_scale)
-        algorithm = RF(agent, params, lr=args.lr, alpha_lr=args.alpha_lr, 
+        algorithm = RF(agent, params, lr=args.lr, alpha_lr=args.alpha_lr,
                            delay_alpha_update=args.delay_alpha_update,
                              lr_schedule_end=args.lr_schedule_end,
                              use_ema=args.use_ema_policy)
@@ -121,12 +129,12 @@ if __name__ == "__main__":
         def mish(x: jax.Array):
             return x * jnp.tanh(jax.nn.softplus(x))
         agent, params = create_rf2_net(init_network_key, obs_dim, act_dim, hidden_sizes, diffusion_hidden_sizes, mish,
-                                          num_timesteps=args.diffusion_steps, 
+                                          num_timesteps=args.diffusion_steps,
                                           num_timesteps_test=args.diffusion_steps_test,
-                                          num_particles=args.num_particles, 
+                                          num_particles=args.num_particles,
                                           noise_scale=args.noise_scale,
                                           target_entropy_scale=args.target_entropy_scale)
-        algorithm = RF2(agent, params, lr=args.lr, alpha_lr=args.alpha_lr, 
+        algorithm = RF2(agent, params, lr=args.lr, alpha_lr=args.alpha_lr,
                            delay_alpha_update=args.delay_alpha_update,
                              lr_schedule_end=args.lr_schedule_end,
                              use_ema=args.use_ema_policy)
@@ -134,12 +142,12 @@ if __name__ == "__main__":
         def mish(x: jax.Array):
             return x * jnp.tanh(jax.nn.softplus(x))
         agent, params = create_mf_net(init_network_key, obs_dim, act_dim, hidden_sizes, diffusion_hidden_sizes, mish,
-                                          num_timesteps=args.diffusion_steps, 
+                                          num_timesteps=args.diffusion_steps,
                                           num_timesteps_test=args.diffusion_steps_test,
-                                          num_particles=args.num_particles, 
+                                          num_particles=args.num_particles,
                                           noise_scale=args.noise_scale,
                                           target_entropy_scale=args.target_entropy_scale)
-        algorithm = MF(agent, params, lr=args.lr, alpha_lr=args.alpha_lr, 
+        algorithm = MF(agent, params, lr=args.lr, alpha_lr=args.alpha_lr,
                            delay_alpha_update=args.delay_alpha_update,
                              lr_schedule_end=args.lr_schedule_end,
                              use_ema=args.use_ema_policy)
@@ -147,12 +155,12 @@ if __name__ == "__main__":
         def mish(x: jax.Array):
             return x * jnp.tanh(jax.nn.softplus(x))
         agent, params = create_mf2_net(init_network_key, obs_dim, act_dim, hidden_sizes, diffusion_hidden_sizes, mish,
-                                          num_timesteps=args.diffusion_steps, 
+                                          num_timesteps=args.diffusion_steps,
                                           num_timesteps_test=args.diffusion_steps_test,
-                                          num_particles=args.num_particles, 
+                                          num_particles=args.num_particles,
                                           noise_scale=args.noise_scale,
                                           target_entropy_scale=args.target_entropy_scale)
-        algorithm = MF2(agent, params, lr=args.lr, alpha_lr=args.alpha_lr, 
+        algorithm = MF2(agent, params, lr=args.lr, alpha_lr=args.alpha_lr,
                            delay_alpha_update=args.delay_alpha_update,
                              lr_schedule_end=args.lr_schedule_end,
                              use_ema=args.use_ema_policy)
@@ -168,7 +176,7 @@ if __name__ == "__main__":
     elif args.alg == "dacer":
         def mish(x: jax.Array):
             return x * jnp.tanh(jax.nn.softplus(x))
-        agent, params = create_dacer_net(init_network_key, obs_dim, act_dim, hidden_sizes, diffusion_hidden_sizes, mish, 
+        agent, params = create_dacer_net(init_network_key, obs_dim, act_dim, hidden_sizes, diffusion_hidden_sizes, mish,
                                          num_timesteps=args.diffusion_steps)
         algorithm = DACER(agent, params, lr=args.lr, lr_schedule_end=args.lr_schedule_end)
     elif args.alg == "dacer_doubleq":
@@ -198,21 +206,35 @@ if __name__ == "__main__":
                                           num_particles=args.num_particles,
                                           noise_scale=args.noise_scale)
         algorithm = QVPO(agent, params, lr=args.lr, alpha_lr=args.alpha_lr, delay_alpha_update=args.delay_alpha_update)
-        
+
     elif args.alg == 'mfsac':
         def mish(x: jax.Array):
             return x * jnp.tanh(jax.nn.softplus(x))
         agent, params = create_mfsac_net(init_network_key, obs_dim, act_dim, hidden_sizes, diffusion_hidden_sizes, mish,
-                                          num_timesteps=args.diffusion_steps, 
+                                          num_timesteps=args.diffusion_steps,
                                           num_timesteps_test=args.diffusion_steps_test,
-                                          num_particles=args.num_particles, 
+                                          num_particles=args.num_particles,
                                           noise_scale=args.noise_scale,
                                           target_entropy_scale=args.target_entropy_scale)
-        algorithm = MFSAC(agent, params, lr=args.lr, alpha_lr=args.alpha_lr, 
+        algorithm = MFSAC(agent, params, lr=args.lr, alpha_lr=args.alpha_lr,
                            delay_alpha_update=args.delay_alpha_update,
                              lr_schedule_end=args.lr_schedule_end,
                              use_ema=args.use_ema_policy)
-        
+
+    elif args.alg == 'mf_r':
+        def mish(x: jax.Array):
+            return x * jnp.tanh(jax.nn.softplus(x))
+        agent, params = create_mfr_net(init_network_key, obs_dim, act_dim, hidden_sizes, diffusion_hidden_sizes, mish,
+                                          num_timesteps=args.diffusion_steps,
+                                          num_timesteps_test=args.diffusion_steps_test,
+                                          num_particles=args.num_particles,
+                                          noise_scale=args.noise_scale,
+                                          target_entropy_scale=args.target_entropy_scale)
+        algorithm = MF_R(agent, params, lr=args.lr, alpha_lr=args.alpha_lr,
+                           delay_alpha_update=args.delay_alpha_update,
+                             lr_schedule_end=args.lr_schedule_end,
+                             use_ema=args.use_ema_policy)
+
     else:
         raise ValueError(f"Invalid algorithm {args.alg}!")
 
@@ -232,7 +254,7 @@ if __name__ == "__main__":
 
     trainer.setup(Experience.create_example(obs_dim, act_dim, trainer.batch_size))
     log_git_details(log_file=os.path.join(exp_dir, 'git.diff'))
-    
+
     # Save the arguments to a YAML file
     args_dict = vars(args)
     with open(os.path.join(exp_dir, 'config.yaml'), 'w') as yaml_file:

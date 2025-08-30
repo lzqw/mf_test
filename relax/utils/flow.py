@@ -29,7 +29,7 @@ class OTFlow:
         t_seq = jnp.arange(self.num_timesteps)
         x, _ = jax.lax.scan(body_fn, x, t_seq)
         return x
-    
+
     def p_sample_traj(self, key: jax.Array, model: FlowModel, shape: Tuple[int, ...]) -> jax.Array:
         x = 0.5 * jax.random.normal(key, shape)
         dt = 1.0 / self.num_timesteps
@@ -41,7 +41,7 @@ class OTFlow:
         t_seq = jnp.arange(self.num_timesteps)
         _, x = jax.lax.scan(body_fn, x, t_seq)
         return x
-    
+
     def p_sample_fast(self, model: FlowModel, shape: Tuple[int, ...]) -> jax.Array:
         x = jnp.zeros(shape)
         drift = model(0, x)
@@ -61,7 +61,7 @@ class OTFlow:
         v_pred = model(t, x_t)
         loss = weights * optax.squared_error(v_pred, (x_start - noise))
         return loss.mean()
-    
+
     def weighted_p_loss_coupled(self, noise: jax.Array, weights: jax.Array, model: FlowModel, t: jax.Array,
                         x_start: jax.Array):
         if len(weights.shape) == 1:
@@ -89,12 +89,12 @@ class MeanFlow:
         t_seq = jnp.arange(self.num_timesteps)
         x, _ = jax.lax.scan(body_fn, x, t_seq)
         return x
-    
+
     def p_sample_fast(self, model: FlowModel, shape: Tuple[int, ...]) -> jax.Array:
         x = jnp.zeros(shape)
         drift = model(x, 0, 1)
         return -drift
-    
+
     def p_sample_traj(self, key: jax.Array, model: MeanFlowModel, shape: Tuple[int, ...]) -> jax.Array:
         x = 0.5 * jax.random.normal(key, shape)
         dt = 1.0 / self.num_timesteps
@@ -125,3 +125,20 @@ class MeanFlow:
         loss = weights * optax.squared_error(u_pred, u_tgt)
         return loss.mean()
 
+    def recon_weighted_p_loss(self, key: jax.Array, weights: jax.Array, model: MeanFlowModel, r: jax.Array, t: jax.Array,
+                        x_start: jax.Array, noise: jax.Array):
+        if len(weights.shape) == 1:
+            weights = weights.reshape(-1, 1)
+        assert r.ndim == 1 and t.ndim == 1 and t.shape[0] == x_start.shape[0]
+        # noise = jax.random.normal(key, x_start.shape)
+        x_t = jax.vmap(self.q_sample)(t, x_start, noise)
+        v = noise - x_start
+        zero_r = jnp.zeros_like(r, dtype=jnp.float32)
+        one_t  = jnp.ones_like(t, dtype=jnp.float32)
+        u_pred, dudt = jax.jvp(model, (x_t, r, t), (v, zero_r, one_t))
+        u_tgt = jax.lax.stop_gradient(v - (t - r)[:, None] * dudt)
+        loss = weights * optax.squared_error(u_pred, u_tgt)
+        return loss.mean()
+
+    def recon_sample(self, t: jax.Array, x_t: jax.Array, noise: jax.Array):
+        return (1 / t) * x_t + (1-t)/t * noise
