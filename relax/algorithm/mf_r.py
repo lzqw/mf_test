@@ -121,7 +121,7 @@ class MF_R(Algorithm):
 
 
             sample_type="policy"
-            use_reset=False
+            use_reset=True
             if sample_type=="gaussian":
                 at = jax.random.normal(action_sample_key, next_action.shape)
                 at = at.clip(-1, 1)
@@ -162,6 +162,7 @@ class MF_R(Algorithm):
                     modified_at = at * t_final[:, jnp.newaxis]
                     noise = jax.random.normal(key, modified_at.shape)
                     a0 = jax.vmap(self.agent.flow.recon_sample)(t_final, modified_at, noise)
+                    a0=a0.clip(-1, 1)
 
                     q_min = get_min_q(obs, a0)
                     q_mean, q_std = q_min.mean(), q_min.std()
@@ -174,6 +175,7 @@ class MF_R(Algorithm):
                 else:
                     noise = jax.random.normal(key, at.shape)
                     a0 = jax.vmap(self.agent.flow.recon_sample)(t_final, at, noise)
+                    a0 = a0.clip(-1, 1)
 
                     q_min = get_min_q(obs, a0)
                     q_mean, q_std = q_min.mean(), q_min.std()
