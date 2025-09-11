@@ -72,6 +72,16 @@ class OTFlow:
         loss = weights * optax.squared_error(v_pred, (x_start - noise))
         return loss.mean()
 
+    def recon_sample(self, t: jax.Array, x_t: jax.Array, noise: jax.Array):
+        return (1 / t[:, jnp.newaxis]) * x_t - (1-t[:, jnp.newaxis])/t[:, jnp.newaxis] * noise
+
+#t_final_unique,at,ut
+    def recon_weighted_p_loss(self,  model, t_final_unique:jax.Array,at:jax.Array,ut:jax.Array):
+        at=jnp.mean(at,axis=1)
+        v_pred = model(t_final_unique, at)
+        loss = optax.squared_error(v_pred, ut)
+        return loss.mean()
+
 @dataclass(frozen=True)
 class MeanFlow:
     num_timesteps: int
@@ -125,13 +135,13 @@ class MeanFlow:
         loss = weights * optax.squared_error(u_pred, u_tgt)
         return loss.mean()
 
-    def recon_weighted_p_loss(self, key: jax.Array, weights: jax.Array, model: MeanFlowModel, r: jax.Array, t: jax.Array,
-                        x_start: jax.Array, noise: jax.Array):
+    def recon_weighted_p_loss(self,  weights: jax.Array, model: MeanFlowModel, r: jax.Array, t: jax.Array,
+                        x_start: jax.Array,x_t:jax.Array,noise:jax.Array):
         if len(weights.shape) == 1:
             weights = weights.reshape(-1, 1)
         assert r.ndim == 1 and t.ndim == 1 and t.shape[0] == x_start.shape[0]
         # noise = jax.random.normal(key, x_start.shape)
-        x_t = jax.vmap(self.q_sample)(t, x_start, noise)
+        # x_t = jax.vmap(self.q_sample)(t, x_start, noise)
         v = noise - x_start
         zero_r = jnp.zeros_like(r, dtype=jnp.float32)
         one_t  = jnp.ones_like(t, dtype=jnp.float32)
@@ -140,5 +150,6 @@ class MeanFlow:
         loss = weights * optax.squared_error(u_pred, u_tgt)
         return loss.mean()
 
+
     def recon_sample(self, t: jax.Array, x_t: jax.Array, noise: jax.Array):
-        return (1 / t) * x_t + (1-t)/t * noise
+        return (1 / t[:, jnp.newaxis]) * x_t - (1-t[:, jnp.newaxis])/t[:, jnp.newaxis] * noise

@@ -139,85 +139,54 @@ class MF_R(Algorithm):
             else:
                 raise NotImplementedError
 
+            r0 = jax.random.uniform(r_key, shape=(obs.shape[0],), minval=0.0, maxval=0.1)
+            # #0.75
+            mask = jax.random.bernoulli(mask_key, p=0.0, shape=(obs.shape[0],))
+            t0 = jax.random.uniform(t_key, shape=(obs.shape[0],), minval=0.9,maxval=1.0)
+            is_t_gt_r = t0 > r0
+            t_swap = jnp.where(is_t_gt_r, t0, r0)
+            r_swap = jnp.where(is_t_gt_r, r0, t0)
+            r_final = jnp.where(mask, r0, r_swap)
+            t_final = jnp.where(mask, r0, t_swap)
+
+            diff_key1, diff_key2 = jax.random.split(key, 2)
+            noise1 = jax.random.normal(diff_key1, at.shape)
+
+            tilde_at = jax.vmap(self.agent.flow.q_sample)(t_final, at, noise1)
+
+            reverse_mc_num = 64
+            tilde_at = jnp.repeat(tilde_at, reverse_mc_num, axis=0)
+
+            # tilde_at=jnp.repeat(at,reverse_mc_num,axis=0)
+            t_final = jnp.repeat(t_final, reverse_mc_num, axis=0)
+            r_final = jnp.repeat(r_final, reverse_mc_num, axis=0)
+            wide_obs = jnp.repeat(obs, reverse_mc_num, axis=0)
+
+
             def recon_policy_loss_fn(policy_params) -> jax.Array:
 
-                r0 = jax.random.uniform(r_key, shape=(obs.shape[0],), minval=0.0, maxval=1.0)
-                #0.75
-                mask = jax.random.bernoulli(mask_key, p=0.0, shape=(obs.shape[0],))
-                t0 = jax.random.uniform(t_key, shape=(obs.shape[0],), minval=0.0, maxval=1.0)
-                is_t_gt_r = t0 > r0
-                t_swap = jnp.where(is_t_gt_r, t0, r0)
-                r_swap = jnp.where(is_t_gt_r, r0, t0)
-                r_final = jnp.where(mask, r0, r_swap)
-                t_final = jnp.where(mask, r0, t_swap)
-
                 def denoiser(x, r, t):
-                    return self.agent.policy(policy_params, obs, x, r, t)
+                    return self.agent.policy(policy_params, wide_obs, x, r, t)
 
-                #TODO: at to a1
-                #TODO: the x0 norm in recon and denoise process is different?
-                #TODO: try same first
-                if use_reset:
+                noise2 = jax.random.normal(diff_key2, (at.shape[0] * reverse_mc_num, at.shape[1]))
 
-                    modified_at = at * t_final[:, jnp.newaxis]
-                    noise = jax.random.normal(key, modified_at.shape)
-                    a0 = jax.vmap(self.agent.flow.recon_sample)(t_final, modified_at, noise)
-                    a0=a0.clip(-1, 1)
+                a0 = self.agent.flow.recon_sample(t_final, tilde_at, noise2).clip(-1, 1)
 
-                    q_min = get_min_q(obs, a0)
-                    q_mean, q_std = q_min.mean(), q_min.std()
-                    norm_q = q_min - running_mean / running_std
-                    scaled_q = norm_q.clip(-3., 3.) / jnp.exp(log_alpha)
-                    q_weights = jnp.exp(scaled_q)
-                    loss = self.agent.flow.recon_weighted_p_loss(flow_noise_key, q_weights, denoiser, r_final, t_final,
-                                                           jax.lax.stop_gradient(a0),noise)
-
-                else:
-                    noise = jax.random.normal(key, at.shape)
-                    a0 = jax.vmap(self.agent.flow.recon_sample)(t_final, at, noise)
-                    a0 = a0.clip(-1, 1)
-
-                    q_min = get_min_q(obs, a0)
-                    q_mean, q_std = q_min.mean(), q_min.std()
-                    norm_q = q_min - running_mean / running_std
-                    scaled_q = norm_q.clip(-3., 3.) / jnp.exp(log_alpha)
-                    q_weights = jnp.exp(scaled_q)
-                    loss = self.agent.flow.recon_weighted_p_loss(flow_noise_key, q_weights, denoiser, r_final, t_final,
-                                                           jax.lax.stop_gradient(a0),noise)
-
-
-
-                return loss, (q_weights, scaled_q, q_mean, q_std)
-
-            def policy_loss_fn(policy_params) -> jax.Array:
-
-                q_min = get_min_q(obs, at)
+                q_min = get_min_q(wide_obs, a0) * 5. / jnp.exp(log_alpha) # 5 is the initial alpha value
                 q_mean, q_std = q_min.mean(), q_min.std()
-                norm_q = q_min - running_mean / running_std
-                scaled_q = norm_q.clip(-3., 3.) / jnp.exp(log_alpha)
-                q_weights = jnp.exp(scaled_q)
-                def denoiser(x, r, t):
-                    return self.agent.policy(policy_params, obs, x, r, t)
+                q_reshape = q_min.reshape((-1, reverse_mc_num)) # [batch_size, mc_num]
+                Z = jax.nn.logsumexp(q_reshape, axis=1, keepdims=True) # [batch_size, 1]
+                q_weights = jnp.exp(q_reshape - Z).flatten() # [batch_size, mc_num]
+                loss = self.agent.flow.recon_weighted_p_loss(q_weights, denoiser, r_final, t_final,
+                                                             a0,tilde_at,noise2)
 
-                r0 = jax.random.uniform(r_key, shape=(obs.shape[0],), minval=0.0, maxval=1.0)
-                #0.75
-                mask = jax.random.bernoulli(mask_key, p=0.0, shape=(obs.shape[0],))
-                t0 = jax.random.uniform(t_key, shape=(obs.shape[0],), minval=0.0, maxval=1.0)
-                is_t_gt_r = t0 > r0
-                t_swap = jnp.where(is_t_gt_r, t0, r0)
-                r_swap = jnp.where(is_t_gt_r, r0, t0)
-                r_final = jnp.where(mask, r0, r_swap)
-                t_final = jnp.where(mask, r0, t_swap)
 
-                loss = self.agent.flow.weighted_p_loss(flow_noise_key, q_weights, denoiser, r_final, t_final,
-                                                            jax.lax.stop_gradient(at))
-                return loss, (q_weights, scaled_q, q_mean, q_std)
-            if sample_type=="policy":
-                (total_loss, (q_weights, scaled_q, q_mean, q_std)), policy_grads = jax.value_and_grad(recon_policy_loss_fn,
-                                                                                                      has_aux=True)(
-                    policy_params)
-            else:
-                (total_loss, (q_weights, scaled_q, q_mean, q_std)), policy_grads = jax.value_and_grad(policy_loss_fn, has_aux=True)(policy_params)
+
+                return loss, (q_weights, q_weights, q_mean, q_std)
+
+
+            (total_loss, (q_weights, scaled_q, q_mean, q_std)), policy_grads = jax.value_and_grad(recon_policy_loss_fn,
+                                                                                                  has_aux=True)(policy_params)
 
             # update alpha
             def log_alpha_loss_fn(log_alpha: jax.Array) -> jax.Array:
