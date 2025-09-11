@@ -141,8 +141,8 @@ class RF(Algorithm):
             K=500
             noisy_actions_repeat = jnp.repeat(jnp.expand_dims(noisy_actions, axis=1), axis=1, repeats=K)
             std = jnp.expand_dims((1-t) / t, axis=-1)
-            lower_bound = -1 / (1-t)[:, :, None] * noisy_actions_repeat - (1 / std)
-            upper_bound = -1 / (1-t)[:, :, None] * noisy_actions_repeat + (1 / std)
+            lower_bound = 1 / (1-t)[:, :, None] * noisy_actions_repeat - (1 / std)
+            upper_bound = 1 / (1-t)[:, :, None] * noisy_actions_repeat + (1 / std)
             #action: batch_size, action_dim
             tnormal_noise = jax.random.truncated_normal(
                 key, lower=lower_bound, upper=upper_bound, shape=(action.shape[0], K, action.shape[1]))
@@ -150,7 +150,7 @@ class RF(Algorithm):
             normal_noise = jax.random.normal(flow_noise_key, shape=((action.shape[0], K, action.shape[1])))
             normal_noise_clip = jnp.clip(normal_noise, min=lower_bound, max=upper_bound)
             noise = jnp.where(jnp.isnan(tnormal_noise), normal_noise_clip, tnormal_noise)
-            clean_samples = 1 / t[:, :, None] * noisy_actions_repeat + std * noise
+            clean_samples = 1 / t[:, :, None] * noisy_actions_repeat - std * noise
 
             observations_repeat = jnp.repeat(jnp.expand_dims(obs, axis=1), axis=1, repeats=K)
 
