@@ -118,57 +118,20 @@ class RF(Algorithm):
             q1_params = optax.apply_updates(q1_params, q1_update)
             q2_params = optax.apply_updates(q2_params, q2_update)
 
-            at = self.agent.get_action(next_eval_key, (policy_params, log_alpha, q1_params, q2_params), obs)
-            t_final = jax.random.uniform(flow_time_key, shape=(obs.shape[0],), minval=0.0, maxval=1.0)
-
-            k = 64
-            at = jnp.repeat(at, k, axis=0)
-            wide_obs = jnp.repeat(obs, k, axis=0)
-            t_final = jnp.repeat(t_final, k, axis=0)
-            diff_key1, diff_key2 = jax.random.split(key, 2)
-            noise1 = jax.random.normal(diff_key1, at.shape)
-
-            a1 = self.agent.flow.recon_sample(t_final, at, noise1).clip(-1, 1)
-            q_values = get_min_q(wide_obs, a1)#  / jnp.exp(log_alpha)  # 5 is the initial alpha value
-
-            beta = 1.0 / jnp.exp(log_alpha)  # Or a separate parameter
-
-            # Calculate softmax weights based on Q-values
-            # 1. Reshape q_values to separate K samples for each original observation
-            q_values_reshaped = q_values.reshape(obs.shape[0], k)
-
-            # 2. Apply softmax along the K samples dimension (axis=1)
-            # The formula is softmax(Q / beta)
-            weights = jax.nn.softmax(q_values_reshaped / beta, axis=1)
-
-            at_reshaped = at.reshape(obs.shape[0], k, -1)
-            noise1_reshaped = noise1.reshape(obs.shape[0], k, -1)
-
-            weights_expanded = jnp.expand_dims(weights, axis=-1)
-
-            weighted_actions_and_noise = weights_expanded * (at_reshaped + noise1_reshaped)
-
-            weighted_sum = jnp.sum(weighted_actions_and_noise, axis=1)
-
-            t_final_reshaped = t_final.reshape(obs.shape[0], k)
-            t_final_unique = t_final_reshaped[:, 0]
-
-            # ut = (1.0 / jnp.expand_dims(t_final_unique, axis=-1)) * weighted_sum
-            ut =  weighted_sum
-            # The `at` variable should be replaced by this `ut` if you want to use the full formula's output.
-            # You might want to use the output `ut` as a target value for your Q-network.
-
-
 
             def policy_loss_fn(policy_params) -> jax.Array:
-
-
+                q_min = get_min_q(next_obs, next_action)
+                q_mean, q_std = q_min.mean(), q_min.std()
+                # modified in rf_v of the visual branch
+                norm_q = q_min - running_mean / running_std
+                scaled_q = norm_q.clip(-3., 3.) / jnp.exp(log_alpha)
+                q_weights = jnp.exp(scaled_q)
                 def denoiser(t, x):
-                    return self.agent.policy(policy_params, obs, x, t)
-                loss = self.agent.flow.recon_weighted_p_loss(denoiser,t_final_unique,at_reshaped,ut)
-
-                return loss, (q_values, q_values, jnp.mean(q_values), jnp.std(q_values))
-
+                    return self.agent.policy(policy_params, next_obs, x, t)
+                t = jax.random.uniform(flow_time_key, shape=(next_obs.shape[0],), minval=0.0, maxval=1.0)
+                loss = self.agent.flow.weighted_p_loss(flow_noise_key, q_weights, denoiser, t,
+                                                            jax.lax.stop_gradient(next_action))
+                return loss, (q_weights, scaled_q, q_mean, q_std)
 
             (total_loss, (q_weights, scaled_q, q_mean, q_std)), policy_grads = jax.value_and_grad(policy_loss_fn, has_aux=True)(policy_params)
 

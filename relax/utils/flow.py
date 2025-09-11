@@ -19,13 +19,15 @@ class OTFlow:
 
     def p_sample(self, key: jax.Array, model: FlowModel, shape: Tuple[int, ...]) -> jax.Array:
         x = 0.5 * jax.random.normal(key, shape)
-        #x = jax.random.normal(key, shape)
+        # x = jax.random.normal(key, shape)
         dt = 1.0 / self.num_timesteps
+
         def body_fn(x, t):
             tau = t * dt
             drift = model(tau, x)
             x_next = x + drift * dt
             return x_next, None
+
         t_seq = jnp.arange(self.num_timesteps)
         x, _ = jax.lax.scan(body_fn, x, t_seq)
         return x
@@ -33,11 +35,13 @@ class OTFlow:
     def p_sample_traj(self, key: jax.Array, model: FlowModel, shape: Tuple[int, ...]) -> jax.Array:
         x = 0.5 * jax.random.normal(key, shape)
         dt = 1.0 / self.num_timesteps
+
         def body_fn(x, t):
             tau = t * dt
             drift = model(tau, x)
             x_next = x + drift * dt
             return x_next, x_next
+
         t_seq = jnp.arange(self.num_timesteps)
         _, x = jax.lax.scan(body_fn, x, t_seq)
         return x
@@ -63,7 +67,7 @@ class OTFlow:
         return loss.mean()
 
     def weighted_p_loss_coupled(self, noise: jax.Array, weights: jax.Array, model: FlowModel, t: jax.Array,
-                        x_start: jax.Array):
+                                x_start: jax.Array):
         if len(weights.shape) == 1:
             weights = weights.reshape(-1, 1)
         assert t.ndim == 1 and t.shape[0] == x_start.shape[0]
@@ -72,15 +76,6 @@ class OTFlow:
         loss = weights * optax.squared_error(v_pred, (x_start - noise))
         return loss.mean()
 
-    def recon_sample(self, t: jax.Array, x_t: jax.Array, noise: jax.Array):
-        return (1 / t[:, jnp.newaxis]) * x_t - (1-t[:, jnp.newaxis])/t[:, jnp.newaxis] * noise
-
-#t_final_unique,at,ut
-    def recon_weighted_p_loss(self,  model, t_final_unique:jax.Array,at:jax.Array,ut:jax.Array):
-        at=jnp.mean(at,axis=1)
-        v_pred = model(t_final_unique, at)
-        loss = optax.squared_error(v_pred, ut)
-        return loss.mean()
 
 @dataclass(frozen=True)
 class MeanFlow:
