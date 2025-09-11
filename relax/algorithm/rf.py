@@ -1,6 +1,11 @@
+from functools import partial
 from typing import NamedTuple, Tuple
 
 import jax, jax.numpy as jnp
+from jax.experimental.shard_map import shard_map
+from jax.sharding import Mesh, PartitionSpec as P
+import flax.linen as nn
+
 import numpy as np
 import optax
 import haiku as hk
@@ -10,6 +15,7 @@ from relax.algorithm.base import Algorithm
 from relax.network.rf import RFNet, Diffv2Params
 from relax.utils.experience import Experience
 from relax.utils.typing import Metric
+
 
 
 class Diffv2OptStates(NamedTuple):
@@ -118,20 +124,55 @@ class RF(Algorithm):
             q1_params = optax.apply_updates(q1_params, q1_update)
             q2_params = optax.apply_updates(q2_params, q2_update)
 
+            # get the noise action
+            flow_time_key,time_rng=jax.random.split(flow_time_key,2)
+            flow_noise_key,noise_rng=jax.random.split(flow_noise_key,2)
+            t = jax.random.uniform(flow_time_key, shape=(next_obs.shape[0],), minval=1e-3, maxval=0.9946)
+            t = jnp.expand_dims(t, axis=1)
+            noise_sample = jax.random.normal(flow_noise_key, action.shape)
+
+            def q_sample(t: int, x_start: jax.Array, noise: jax.Array):
+                return t * x_start + (1 - t) * noise
+
+            noisy_actions = q_sample(t, action, noise_sample)
+
+
+            #TODO: is a1=(1/t)at+(1-t)/t*et or a1=(1/t)at-(1-t)/t*et
+            K=500
+            noisy_actions_repeat = jnp.repeat(jnp.expand_dims(noisy_actions, axis=1), axis=1, repeats=K)
+            std = jnp.expand_dims((1-t) / t, axis=-1)
+            lower_bound = -1 / (1-t)[:, :, None] * noisy_actions_repeat - (1 / std)
+            upper_bound = -1 / (1-t)[:, :, None] * noisy_actions_repeat + (1 / std)
+            #action: batch_size, action_dim
+            tnormal_noise = jax.random.truncated_normal(
+                key, lower=lower_bound, upper=upper_bound, shape=(action.shape[0], K, action.shape[1]))
+            flow_noise_key,noise_rng=jax.random.split(flow_noise_key,2)
+            normal_noise = jax.random.normal(flow_noise_key, shape=((action.shape[0], K, action.shape[1])))
+            normal_noise_clip = jnp.clip(normal_noise, min=lower_bound, max=upper_bound)
+            noise = jnp.where(jnp.isnan(tnormal_noise), normal_noise_clip, tnormal_noise)
+            clean_samples = 1 / t[:, :, None] * noisy_actions_repeat + std * noise
+
+            observations_repeat = jnp.repeat(jnp.expand_dims(obs, axis=1), axis=1, repeats=K)
+
+            devices = jax.devices()
+            compute_Q_DDP = partial(shard_map, mesh=Mesh(devices, ('i',)), in_specs=(P('i'), P('i')), out_specs=(P('i')))(get_min_q)
+            critic = compute_Q_DDP( observations_repeat, clean_samples)  # batch_size, K
+            weight = nn.softmax((1 / jnp.exp(log_alpha)) * critic, axis=1)
+            u_estimation = jnp.sum(weight[:,:,None] * (clean_samples-noise), axis=1)
+
+            #eps_estimation = -jnp.sum(weight[:, :, None] * noise, axis=1)
 
             def policy_loss_fn(policy_params) -> jax.Array:
-                q_min = get_min_q(next_obs, next_action)
-                q_mean, q_std = q_min.mean(), q_min.std()
-                # modified in rf_v of the visual branch
-                norm_q = q_min - running_mean / running_std
-                scaled_q = norm_q.clip(-3., 3.) / jnp.exp(log_alpha)
-                q_weights = jnp.exp(scaled_q)
+
                 def denoiser(t, x):
-                    return self.agent.policy(policy_params, next_obs, x, t)
-                t = jax.random.uniform(flow_time_key, shape=(next_obs.shape[0],), minval=0.0, maxval=1.0)
-                loss = self.agent.flow.weighted_p_loss(flow_noise_key, q_weights, denoiser, t,
-                                                            jax.lax.stop_gradient(next_action))
-                return loss, (q_weights, scaled_q, q_mean, q_std)
+                    return self.agent.policy(policy_params, obs, x, t)
+                loss = self.agent.flow.reverse_weighted_p_loss(denoiser, t, noisy_actions,
+                                                            jax.lax.stop_gradient(u_estimation))
+                """
+                    def reverse_weighted_p_loss(self,  model: FlowModel, t: jax.Array,
+                        x_t: jax.Array, u_estimation:jax.Array):
+                """
+                return loss, (jnp.sum(weight[:,:,None]), u_estimation, jnp.mean(jnp.sum(weight[:,:,None])), jnp.std(jnp.sum(weight[:,:,None])))
 
             (total_loss, (q_weights, scaled_q, q_mean, q_std)), policy_grads = jax.value_and_grad(policy_loss_fn, has_aux=True)(policy_params)
 

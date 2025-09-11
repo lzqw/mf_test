@@ -50,7 +50,7 @@ from relax.utils.log_diff import log_git_details
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--alg", type=str, default="rf2")
+    parser.add_argument("--alg", type=str, default="rf")
     parser.add_argument("--env", type=str, default="Ant-v4")
     parser.add_argument("--suffix", type=str, default="test_use_atp1")
     parser.add_argument("--num_vec_envs", type=int, default=2)
@@ -70,7 +70,7 @@ if __name__ == "__main__":
     parser.add_argument("--noise_scale", type=float, default=0.1)
     parser.add_argument("--target_entropy_scale", type=float, default=1.5)
     parser.add_argument("--replay_buffer_size", type=int, default=int(1e6))
-    parser.add_argument("--debug", default=True)
+    parser.add_argument("--debug", default=False)
     parser.add_argument("--use_ema_policy", default=True, action="store_true")
     args = parser.parse_args()
 
