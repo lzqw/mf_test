@@ -55,13 +55,13 @@ from relax.utils.log_diff import log_git_details
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--alg", type=str, default="rf")
+    parser.add_argument("--alg", type=str, default="mf_sac")
     parser.add_argument("--env", type=str, default="Ant-v4")
     parser.add_argument("--suffix", type=str, default="test_use_atp1")
     parser.add_argument("--num_vec_envs", type=int, default=2)
     parser.add_argument("--hidden_num", type=int, default=3)
     parser.add_argument("--hidden_dim", type=int, default=256)
-    parser.add_argument("--diffusion_steps", type=int, default=10)  #SET 1 FOT MF BASED ALGORITHM
+    parser.add_argument("--diffusion_steps", type=int, default=1)  #SET 1 FOT MF BASED ALGORITHM
     parser.add_argument("--diffusion_steps_test", type=int, default=20)
     parser.add_argument("--diffusion_hidden_dim", type=int, default=256)
     parser.add_argument("--start_step", type=int, default=int(3e4)) # other envs 3e4
@@ -75,7 +75,7 @@ if __name__ == "__main__":
     parser.add_argument("--noise_scale", type=float, default=0.1)
     parser.add_argument("--target_entropy_scale", type=float, default=1.5)
     parser.add_argument("--replay_buffer_size", type=int, default=int(1e6))
-    parser.add_argument("--debug", default=False)
+    parser.add_argument("--debug", default=True)
     parser.add_argument("--use_ema_policy", default=True, action="store_true")
     parser.add_argument("--sample_k", type=int, default=500)
     args = parser.parse_args()
@@ -213,34 +213,6 @@ if __name__ == "__main__":
                                           noise_scale=args.noise_scale)
         algorithm = QVPO(agent, params, lr=args.lr, alpha_lr=args.alpha_lr, delay_alpha_update=args.delay_alpha_update)
 
-    elif args.alg == 'mfsac':
-        def mish(x: jax.Array):
-            return x * jnp.tanh(jax.nn.softplus(x))
-        agent, params = create_mfsac_net(init_network_key, obs_dim, act_dim, hidden_sizes, diffusion_hidden_sizes, mish,
-                                          num_timesteps=args.diffusion_steps,
-                                          num_timesteps_test=args.diffusion_steps_test,
-                                          num_particles=args.num_particles,
-                                          noise_scale=args.noise_scale,
-                                          target_entropy_scale=args.target_entropy_scale)
-        algorithm = MFSAC(agent, params, lr=args.lr, alpha_lr=args.alpha_lr,
-                           delay_alpha_update=args.delay_alpha_update,
-                             lr_schedule_end=args.lr_schedule_end,
-                             use_ema=args.use_ema_policy)
-
-    elif args.alg == 'mf_r':
-        def mish(x: jax.Array):
-            return x * jnp.tanh(jax.nn.softplus(x))
-        agent, params = create_mfr_net(init_network_key, obs_dim, act_dim, hidden_sizes, diffusion_hidden_sizes, mish,
-                                          num_timesteps=args.diffusion_steps,
-                                          num_timesteps_test=args.diffusion_steps_test,
-                                          num_particles=args.num_particles,
-                                          noise_scale=args.noise_scale,
-                                          target_entropy_scale=args.target_entropy_scale)
-        algorithm = MF_R(agent, params, lr=args.lr, alpha_lr=args.alpha_lr,
-                           delay_alpha_update=args.delay_alpha_update,
-                             lr_schedule_end=args.lr_schedule_end,
-                             use_ema=args.use_ema_policy)
-
     elif args.alg == 'rf_sac':
         def mish(x: jax.Array):
             return x * jnp.tanh(jax.nn.softplus(x))
@@ -269,6 +241,20 @@ if __name__ == "__main__":
                              lr_schedule_end=args.lr_schedule_end,
                              use_ema=args.use_ema_policy,
                           sample_k=args.sample_k)
+    elif args.alg == 'mf_sac':
+        def mish(x: jax.Array):
+            return x * jnp.tanh(jax.nn.softplus(x))
+        agent, params = create_mf_sac_net(init_network_key, obs_dim, act_dim, hidden_sizes, diffusion_hidden_sizes, mish,
+                                          num_timesteps=args.diffusion_steps,
+                                          num_timesteps_test=args.diffusion_steps_test,
+                                          num_particles=args.num_particles,
+                                          noise_scale=args.noise_scale,
+                                          target_entropy_scale=args.target_entropy_scale)
+        algorithm = MFSAC(agent, params, lr=args.lr, alpha_lr=args.alpha_lr,
+                           delay_alpha_update=args.delay_alpha_update,
+                             lr_schedule_end=args.lr_schedule_end,
+                             use_ema=args.use_ema_policy)
+
     else:
         raise ValueError(f"Invalid algorithm {args.alg}!")
 

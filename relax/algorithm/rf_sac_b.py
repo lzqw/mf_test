@@ -171,7 +171,7 @@ class RFSACB(Algorithm):
             def policy_loss_fn(policy_params) -> jax.Array:
 
                 def denoiser(t, x):
-                    return self.agent.policy(policy_params, obs, x, t)
+                    return self.agent.policy(policy_params, next_obs, x, t)
                 loss = self.agent.flow.reverse_weighted_p_loss(denoiser, t, noisy_actions,
                                                             jax.lax.stop_gradient(u_estimation))
                 """

@@ -141,7 +141,7 @@ class RFSAC(Algorithm):
 
 
             #TODO: is a1=(1/t)at+(1-t)/t*et or a1=(1/t)at-(1-t)/t*et
-            noisy_actions_repeat = jnp.repeat(jnp.expand_dims(noisy_actions, axis=1), axis=1, repeats=K)
+            noisy_actions_repeat = jnp.repeat(jnp.expand_dims(noisy_actions, axis=1), axis=1, repeats=self.K)
             std = jnp.expand_dims((1-t) / t, axis=-1)
             lower_bound = 1 / (1-t)[:, :, None] * noisy_actions_repeat - (1 / std)
             upper_bound = 1 / (1-t)[:, :, None] * noisy_actions_repeat + (1 / std)
