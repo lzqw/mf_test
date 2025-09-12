@@ -1,15 +1,21 @@
+from functools import partial
 from typing import NamedTuple, Tuple
 
 import jax, jax.numpy as jnp
+from jax.experimental.shard_map import shard_map
+from jax.sharding import Mesh, PartitionSpec as P
+import flax.linen as nn
+
 import numpy as np
 import optax
 import haiku as hk
 import pickle
 
 from relax.algorithm.base import Algorithm
-from relax.network.mf import MFNet, Diffv2Params
+from relax.network.rf_sac import RFSACNet, Diffv2Params
 from relax.utils.experience import Experience
 from relax.utils.typing import Metric
+
 
 
 class Diffv2OptStates(NamedTuple):
@@ -27,11 +33,11 @@ class Diffv2TrainState(NamedTuple):
     running_mean: float
     running_std: float
 
-class MFSAC(Algorithm):
+class RFSAC(Algorithm):
 
     def __init__(
         self,
-        agent: MFNet,
+        agent: RFSACNet,
         params: Diffv2Params,
         *,
         gamma: float = 0.99,
@@ -44,6 +50,7 @@ class MFSAC(Algorithm):
         reward_scale: float = 0.2,
         num_samples: int = 200,
         use_ema: bool = True,
+        sample_k:int = 500
     ):
         self.agent = agent
         self.gamma = gamma
@@ -79,6 +86,8 @@ class MFSAC(Algorithm):
         )
         self.use_ema = use_ema
 
+        self.K=sample_k
+
         @jax.jit
         def stateless_update(
             key: jax.Array, state: Diffv2TrainState, data: Experience
@@ -89,10 +98,9 @@ class MFSAC(Algorithm):
             step = state.step
             running_mean = state.running_mean
             running_std = state.running_std
-            # next_eval_key, flow_noise_key, r_key, mask_key, t_key = jax.random.split(
-            #     key, 5)
-            next_eval_key,  flow_noise_key, r_key, mask_key, t_key, action_sample_key= jax.random.split(
-                key, 6)
+            next_eval_key, new_eval_key, new_q1_eval_key, new_q2_eval_key, log_alpha_key, flow_time_key, flow_noise_key = jax.random.split(
+                key, 7)
+
             reward *= self.reward_scale
 
             def get_min_q(s, a):
@@ -119,46 +127,54 @@ class MFSAC(Algorithm):
             q1_params = optax.apply_updates(q1_params, q1_update)
             q2_params = optax.apply_updates(q2_params, q2_update)
 
-            #sample at from uniform,gaussian or old policy
-            action_sample_key = jax.random.split(action_sample_key, self.agent.num_particles)
-            sample_type="uniform"
-            if sample_type=="gaussian":
-                at = jax.random.normal(action_sample_key, next_action.shape)
-                at = at.clip(-1, 1)
-            elif sample_type=="uniform":
-                at = jax.vmap(lambda key: jax.random.uniform(key, action.shape, minval=-1, maxval=1))(action_sample_key)
-            else:
-                raise NotImplementedError
-            obs_expanded = jnp.repeat(obs[jnp.newaxis, ...], self.agent.num_particles, axis=0)
-            
-            # Now call the function with the correctly shaped obs
-            qs = get_min_q(obs_expanded, at)
-            q_best_ind = jnp.argmax(qs, axis=0, keepdims=True)
-            at = jnp.take_along_axis(at, q_best_ind[..., None], axis=0).squeeze(axis=0)
+            # get the noise action
+            flow_time_key,time_rng=jax.random.split(flow_time_key,2)
+            flow_noise_key,noise_rng=jax.random.split(flow_noise_key,2)
+            t = jax.random.uniform(flow_time_key, shape=(next_obs.shape[0],), minval=1e-3, maxval=0.9946)
+            t = jnp.expand_dims(t, axis=1)
+            noise_sample = jax.random.normal(flow_noise_key, action.shape)
+
+            def q_sample(t: int, x_start: jax.Array, noise: jax.Array):
+                return t * x_start + (1 - t) * noise
+
+            noisy_actions = q_sample(t, action, noise_sample)
+
+
+            #TODO: is a1=(1/t)at+(1-t)/t*et or a1=(1/t)at-(1-t)/t*et
+            noisy_actions_repeat = jnp.repeat(jnp.expand_dims(noisy_actions, axis=1), axis=1, repeats=K)
+            std = jnp.expand_dims((1-t) / t, axis=-1)
+            lower_bound = 1 / (1-t)[:, :, None] * noisy_actions_repeat - (1 / std)
+            upper_bound = 1 / (1-t)[:, :, None] * noisy_actions_repeat + (1 / std)
+            #action: batch_size, action_dim
+            tnormal_noise = jax.random.truncated_normal(
+                key, lower=lower_bound, upper=upper_bound, shape=(action.shape[0], self.K, action.shape[1]))
+            flow_noise_key,noise_rng=jax.random.split(flow_noise_key,2)
+            normal_noise = jax.random.normal(flow_noise_key, shape=((action.shape[0], self.K, action.shape[1])))
+            normal_noise_clip = jnp.clip(normal_noise, min=lower_bound, max=upper_bound)
+            noise = jnp.where(jnp.isnan(tnormal_noise), normal_noise_clip, tnormal_noise)
+            clean_samples = 1 / t[:, :, None] * noisy_actions_repeat - std * noise
+
+            observations_repeat = jnp.repeat(jnp.expand_dims(obs, axis=1), axis=1, repeats=self.K)
+
+            devices = jax.devices()
+            compute_Q_DDP = partial(shard_map, mesh=Mesh(devices, ('i',)), in_specs=(P('i'), P('i')), out_specs=(P('i')))(get_min_q)
+            critic = compute_Q_DDP( observations_repeat, clean_samples)  # batch_size, K
+            weight = nn.softmax((1 / jnp.exp(log_alpha)) * critic, axis=1)
+            u_estimation = jnp.sum(weight[:,:,None] * (clean_samples-noise), axis=1)
+
+            #eps_estimation = -jnp.sum(weight[:, :, None] * noise, axis=1)
 
             def policy_loss_fn(policy_params) -> jax.Array:
-                
-                q_min = get_min_q(obs, at)
-                q_mean, q_std = q_min.mean(), q_min.std()
-                norm_q = q_min - running_mean / running_std
-                scaled_q = norm_q.clip(-3., 3.) / jnp.exp(log_alpha)
-                q_weights = jnp.exp(scaled_q)
-                def denoiser(x, r, t):
-                    return self.agent.policy(policy_params, obs, x, r, t)
-                
-                r0 = jax.random.uniform(r_key, shape=(obs.shape[0],), minval=0.0, maxval=1.0)
-                #0.75
-                mask = jax.random.bernoulli(mask_key, p=0.0, shape=(obs.shape[0],))  
-                t0 = jax.random.uniform(t_key, shape=(obs.shape[0],), minval=0.0, maxval=1.0)
-                is_t_gt_r = t0 > r0
-                t_swap = jnp.where(is_t_gt_r, t0, r0)
-                r_swap = jnp.where(is_t_gt_r, r0, t0)
-                r_final = jnp.where(mask, r0, r_swap)
-                t_final = jnp.where(mask, r0, t_swap)
 
-                loss = self.agent.flow.weighted_p_loss(flow_noise_key, q_weights, denoiser, r_final, t_final,
-                                                            jax.lax.stop_gradient(at))
-                return loss, (q_weights, scaled_q, q_mean, q_std)
+                def denoiser(t, x):
+                    return self.agent.policy(policy_params, obs, x, t)
+                loss = self.agent.flow.reverse_weighted_p_loss(denoiser, t, noisy_actions,
+                                                            jax.lax.stop_gradient(u_estimation))
+                """
+                    def reverse_weighted_p_loss(self,  model: FlowModel, t: jax.Array,
+                        x_t: jax.Array, u_estimation:jax.Array):
+                """
+                return loss, (jnp.sum(weight[:,:,None]), u_estimation, jnp.mean(jnp.sum(weight[:,:,None])), jnp.std(jnp.sum(weight[:,:,None])))
 
             (total_loss, (q_weights, scaled_q, q_mean, q_std)), policy_grads = jax.value_and_grad(policy_loss_fn, has_aux=True)(policy_params)
 
@@ -238,8 +254,8 @@ class MFSAC(Algorithm):
             }
             return state, info
 
-        self._implement_common_behavior(stateless_update, self.agent.get_action, self.agent.get_deterministic_action, 
-                                        stateless_get_vanilla_action=self.agent.get_vanilla_action, 
+        self._implement_common_behavior(stateless_update, self.agent.get_action, self.agent.get_deterministic_action,
+                                        stateless_get_vanilla_action=self.agent.get_vanilla_action,
                                         stateless_get_vanilla_action_step=self.agent.get_vanilla_action_step)
 
     def get_policy_params(self):

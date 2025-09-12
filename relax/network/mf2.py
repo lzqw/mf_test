@@ -10,6 +10,7 @@ from relax.network.blocks import Activation, DACERPolicyNet2, QNet
 from relax.utils.flow import MeanFlow
 from relax.utils.jax_utils import random_key_from_data
 
+
 class Diffv2Params(NamedTuple):
     q1: hk.Params
     q2: hk.Params
@@ -35,7 +36,7 @@ class MF2Net:
     @property
     def flow(self) -> MeanFlow:
         return MeanFlow(self.num_timesteps)
-    
+
     @property
     def flow_test(self) -> MeanFlow:
         return MeanFlow(self.num_timesteps_test)
@@ -63,7 +64,7 @@ class MF2Net:
             act = jnp.take_along_axis(acts, q_best_ind[..., None], axis=0).squeeze(axis=0)
         act = act + jax.random.normal(noise_key, act.shape) * jnp.exp(log_alpha) * self.noise_scale
         return act
-    
+
     def get_vanilla_action(self, key: jax.Array, policy_params: hk.Params, obs: jax.Array) -> jax.Array:
         policy_params, _, _, _ = policy_params
 
@@ -76,7 +77,7 @@ class MF2Net:
 
         act = sample(key)
         return act
-    
+
     def get_vanilla_action_step(self, key: jax.Array, policy_params: hk.Params, obs: jax.Array) -> jax.Array:
         policy_params, _, _, _ = policy_params
 
@@ -96,7 +97,7 @@ class MF2Net:
         log_alpha = -jnp.inf
         policy_params = (policy_params, log_alpha, q1_params, q2_params)
         return self.get_action(key, policy_params, obs)
-    
+
 
 def create_mf2_net(
     key: jax.Array,
@@ -109,10 +110,11 @@ def create_mf2_net(
     num_timesteps_test: int = 20,
     num_particles: int = 32,
     noise_scale: float = 0.05,
-    target_entropy_scale = 0.9,
-    ) -> Tuple[MF2Net, Diffv2Params]:
+    target_entropy_scale=0.9,
+) -> Tuple[MF2Net, Diffv2Params]:
     q = hk.without_apply_rng(hk.transform(lambda obs, act: QNet(hidden_sizes, activation)(obs, act)))
-    policy = hk.without_apply_rng(hk.transform(lambda obs, act, r, t: DACERPolicyNet2(diffusion_hidden_sizes, activation)(obs, act, r, t)))
+    policy = hk.without_apply_rng(
+        hk.transform(lambda obs, act, r, t: DACERPolicyNet2(diffusion_hidden_sizes, activation)(obs, act, r, t)))
 
     @jax.jit
     def init(key, obs, act):
@@ -123,14 +125,16 @@ def create_mf2_net(
         target_q2_params = q2_params
         policy_params = policy.init(policy_key, obs, act, 0, 0)
         target_policy_params = policy_params
-        log_alpha = jnp.array(math.log(5), dtype=jnp.float32) # math.log(3) or math.log(5) choose one
-        return Diffv2Params(q1_params, q2_params, target_q1_params, target_q2_params, policy_params, target_policy_params, log_alpha)
+        log_alpha = jnp.array(math.log(5), dtype=jnp.float32)  # math.log(3) or math.log(5) choose one
+        return Diffv2Params(q1_params, q2_params, target_q1_params, target_q2_params, policy_params,
+                            target_policy_params, log_alpha)
 
     sample_obs = jnp.zeros((1, obs_dim))
     sample_act = jnp.zeros((1, act_dim))
     params = init(key, sample_obs, sample_act)
 
-    net = MF2Net(q=q.apply, policy=policy.apply, num_timesteps=num_timesteps, num_timesteps_test=num_timesteps_test, act_dim=act_dim, 
-                    target_entropy=-act_dim*target_entropy_scale, num_particles=num_particles, noise_scale=noise_scale,
-                    noise_schedule='linear')
+    net = MF2Net(q=q.apply, policy=policy.apply, num_timesteps=num_timesteps, num_timesteps_test=num_timesteps_test,
+                 act_dim=act_dim,
+                 target_entropy=-act_dim * target_entropy_scale, num_particles=num_particles, noise_scale=noise_scale,
+                 noise_schedule='linear')
     return net, params

@@ -7,7 +7,7 @@ import haiku as hk
 import pickle
 
 from relax.algorithm.base import Algorithm
-from relax.network.mf_r import MFRNet, Diffv2Params
+from relax.network.mf_sac import MFSACNet, Diffv2Params
 from relax.utils.experience import Experience
 from relax.utils.typing import Metric
 
@@ -27,11 +27,12 @@ class Diffv2TrainState(NamedTuple):
     running_mean: float
     running_std: float
 
-class MF_R(Algorithm):
+
+class MFSAC(Algorithm):
 
     def __init__(
         self,
-        agent: MFRNet,
+        agent: MFSACNet,
         params: Diffv2Params,
         *,
         gamma: float = 0.99,
@@ -89,10 +90,9 @@ class MF_R(Algorithm):
             step = state.step
             running_mean = state.running_mean
             running_std = state.running_std
-            # next_eval_key, flow_noise_key, r_key, mask_key, t_key = jax.random.split(
-            #     key, 5)
-            next_eval_key,  flow_noise_key, r_key, mask_key, t_key, action_sample_key= jax.random.split(
-                key, 6)
+            next_eval_key, flow_noise_key, r_key, mask_key, t_key = jax.random.split(
+                key, 5)
+
             reward *= self.reward_scale
 
             def get_min_q(s, a):
@@ -101,7 +101,8 @@ class MF_R(Algorithm):
                 q = jnp.minimum(q1, q2)
                 return q
 
-            next_action = self.agent.get_action(next_eval_key, (policy_params, log_alpha, q1_params, q2_params), next_obs)
+            next_action = self.agent.get_action(next_eval_key, (policy_params, log_alpha, q1_params, q2_params),
+                                                next_obs)
             q1_target = self.agent.q(target_q1_params, next_obs, next_action)
             q2_target = self.agent.q(target_q2_params, next_obs, next_action)
             q_target = jnp.minimum(q1_target, q2_target)  # - jnp.exp(log_alpha) * next_logp
@@ -119,79 +120,40 @@ class MF_R(Algorithm):
             q1_params = optax.apply_updates(q1_params, q1_update)
             q2_params = optax.apply_updates(q2_params, q2_update)
 
-
-            sample_type="policy"
-            use_reset=True
-            if sample_type=="gaussian":
-                at = jax.random.normal(action_sample_key, next_action.shape)
-                at = at.clip(-1, 1)
-            elif sample_type=="policy":
-                # sample at from uniform,gaussian or old policy
-                at = self.agent.get_action(action_sample_key, (policy_params, log_alpha, q1_params, q2_params),obs)
-            elif sample_type=="uniform":
-                # sample at from uniform,gaussian or old policy
-                action_sample_key = jax.random.split(action_sample_key, self.agent.num_particles)
-                at = jax.vmap(lambda key: jax.random.uniform(key, action.shape, minval=-1, maxval=1))(action_sample_key)
-                obs_expanded = jnp.repeat(obs[jnp.newaxis, ...], self.agent.num_particles, axis=0)
-                qs = get_min_q(obs_expanded, at)
-                q_best_ind = jnp.argmax(qs, axis=0, keepdims=True)
-                at = jnp.take_along_axis(at, q_best_ind[..., None], axis=0).squeeze(axis=0)
-            else:
-                raise NotImplementedError
-
-            r0 = jax.random.uniform(r_key, shape=(obs.shape[0],), minval=0.0, maxval=0.1)
-            # #0.75
-            mask = jax.random.bernoulli(mask_key, p=0.0, shape=(obs.shape[0],))
-            t0 = jax.random.uniform(t_key, shape=(obs.shape[0],), minval=0.9,maxval=1.0)
-            is_t_gt_r = t0 > r0
-            t_swap = jnp.where(is_t_gt_r, t0, r0)
-            r_swap = jnp.where(is_t_gt_r, r0, t0)
-            r_final = jnp.where(mask, r0, r_swap)
-            t_final = jnp.where(mask, r0, t_swap)
-
-            diff_key1, diff_key2 = jax.random.split(key, 2)
-            noise1 = jax.random.normal(diff_key1, at.shape)
-
-            tilde_at = jax.vmap(self.agent.flow.q_sample)(t_final, at, noise1)
-
-            reverse_mc_num = 64
-            tilde_at = jnp.repeat(tilde_at, reverse_mc_num, axis=0)
-
-            # tilde_at=jnp.repeat(at,reverse_mc_num,axis=0)
-            t_final = jnp.repeat(t_final, reverse_mc_num, axis=0)
-            r_final = jnp.repeat(r_final, reverse_mc_num, axis=0)
-            wide_obs = jnp.repeat(obs, reverse_mc_num, axis=0)
-
-
-            def recon_policy_loss_fn(policy_params) -> jax.Array:
+            def policy_loss_fn(policy_params) -> jax.Array:
+                q_min = get_min_q(next_obs, next_action)
+                q_mean, q_std = q_min.mean(), q_min.std()
+                norm_q = q_min - running_mean / running_std
+                scaled_q = norm_q.clip(-3., 3.) / jnp.exp(log_alpha)
+                q_weights = jnp.exp(scaled_q)
 
                 def denoiser(x, r, t):
-                    return self.agent.policy(policy_params, wide_obs, x, r, t)
+                    return self.agent.policy(policy_params, next_obs, x, r, t)
 
-                noise2 = jax.random.normal(diff_key2, (at.shape[0] * reverse_mc_num, at.shape[1]))
+                r0 = jax.random.uniform(r_key, shape=(next_obs.shape[0],), minval=0.0, maxval=1.0)
+                # 0.75
+                mask = jax.random.bernoulli(mask_key, p=0.0, shape=(next_obs.shape[0],))
+                t0 = jax.random.uniform(t_key, shape=(next_obs.shape[0],), minval=0.0, maxval=1.0)
+                is_t_gt_r = t0 > r0
+                t_swap = jnp.where(is_t_gt_r, t0, r0)
+                r_swap = jnp.where(is_t_gt_r, r0, t0)
+                r_final = jnp.where(mask, r0, r_swap)
+                t_final = jnp.where(mask, r0, t_swap)
 
-                a0 = self.agent.flow.recon_sample(t_final, tilde_at, noise2).clip(-1, 1)
+                loss = self.agent.flow.weighted_p_loss(flow_noise_key, q_weights, denoiser, r_final, t_final,
+                                                       jax.lax.stop_gradient(next_action))
+                return loss, (q_weights, scaled_q, q_mean, q_std)
 
-                q_min = get_min_q(wide_obs, a0) * 5. / jnp.exp(log_alpha) # 5 is the initial alpha value
-                q_mean, q_std = q_min.mean(), q_min.std()
-                q_reshape = q_min.reshape((-1, reverse_mc_num)) # [batch_size, mc_num]
-                Z = jax.nn.logsumexp(q_reshape, axis=1, keepdims=True) # [batch_size, 1]
-                q_weights = jnp.exp(q_reshape - Z).flatten() # [batch_size, mc_num]
-                loss = self.agent.flow.recon_weighted_p_loss(q_weights, denoiser, r_final, t_final,
-                                                             a0,tilde_at,noise2)
-
-
-
-                return loss, (q_weights, q_weights, q_mean, q_std)
-
-
-            (total_loss, (q_weights, scaled_q, q_mean, q_std)), policy_grads = jax.value_and_grad(recon_policy_loss_fn,
-                                                                                                  has_aux=True)(policy_params)
+            (total_loss, (q_weights, scaled_q, q_mean, q_std)), policy_grads = jax.value_and_grad(policy_loss_fn,
+                                                                                                  has_aux=True)(
+                policy_params)
 
             # update alpha
             def log_alpha_loss_fn(log_alpha: jax.Array) -> jax.Array:
-                approx_entropy = 0.5 * self.agent.act_dim * jnp.log( 2 * jnp.pi * jnp.exp(1) * (0.1 * jnp.exp(log_alpha)) ** 2)
-                log_alpha_loss = -1 * log_alpha * (-1 * jax.lax.stop_gradient(approx_entropy) + self.agent.target_entropy)
+                approx_entropy = 0.5 * self.agent.act_dim * jnp.log(
+                    2 * jnp.pi * jnp.exp(1) * (0.1 * jnp.exp(log_alpha)) ** 2)
+                log_alpha_loss = -1 * log_alpha * (
+                        -1 * jax.lax.stop_gradient(approx_entropy) + self.agent.target_entropy)
                 return log_alpha_loss
 
             # update networks
@@ -211,7 +173,8 @@ class MF_R(Algorithm):
             def delay_alpha_param_update(optim, params, opt_state):
                 return jax.lax.cond(
                     step % self.delay_alpha_update == 0,
-                    lambda params, opt_state: param_update(optim, params, jax.grad(log_alpha_loss_fn)(params), opt_state),
+                    lambda params, opt_state: param_update(optim, params, jax.grad(log_alpha_loss_fn)(params),
+                                                           opt_state),
                     lambda params, opt_state: (params, opt_state),
                     params, opt_state
                 )
@@ -226,7 +189,8 @@ class MF_R(Algorithm):
 
             q1_params, q1_opt_state = param_update(self.optim, q1_params, q1_grads, q1_opt_state)
             q2_params, q2_opt_state = param_update(self.optim, q2_params, q2_grads, q2_opt_state)
-            policy_params, policy_opt_state = delay_param_update(self.policy_optim, policy_params, policy_grads, policy_opt_state)
+            policy_params, policy_opt_state = delay_param_update(self.policy_optim, policy_params, policy_grads,
+                                                                 policy_opt_state)
             log_alpha, log_alpha_opt_state = delay_alpha_param_update(self.alpha_optim, log_alpha, log_alpha_opt_state)
 
             target_q1_params = delay_target_update(q1_params, target_q1_params, self.tau)
@@ -237,8 +201,10 @@ class MF_R(Algorithm):
             new_running_std = running_std + 0.001 * (q_std - running_std)
 
             state = Diffv2TrainState(
-                params=Diffv2Params(q1_params, q2_params, target_q1_params, target_q2_params, policy_params, target_policy_params, log_alpha),
-                opt_state=Diffv2OptStates(q1=q1_opt_state, q2=q2_opt_state, policy=policy_opt_state, log_alpha=log_alpha_opt_state),
+                params=Diffv2Params(q1_params, q2_params, target_q1_params, target_q2_params, policy_params,
+                                    target_policy_params, log_alpha),
+                opt_state=Diffv2OptStates(q1=q1_opt_state, q2=q2_opt_state, policy=policy_opt_state,
+                                          log_alpha=log_alpha_opt_state),
                 step=step + 1,
                 entropy=jnp.float32(0.0),
                 running_mean=new_running_mean,
@@ -260,7 +226,8 @@ class MF_R(Algorithm):
                 "scale_q_std": jnp.std(scaled_q),
                 "running_q_mean": new_running_mean,
                 "running_q_std": new_running_std,
-                "entropy_approx": 0.5 * self.agent.act_dim * jnp.log( 2 * jnp.pi * jnp.exp(1) * (0.1 * jnp.exp(log_alpha)) ** 2),
+                "entropy_approx": 0.5 * self.agent.act_dim * jnp.log(
+                    2 * jnp.pi * jnp.exp(1) * (0.1 * jnp.exp(log_alpha)) ** 2),
             }
             return state, info
 
@@ -269,7 +236,7 @@ class MF_R(Algorithm):
                                         stateless_get_vanilla_action_step=self.agent.get_vanilla_action_step)
 
     def get_policy_params(self):
-        return (self.state.params.policy, self.state.params.log_alpha, self.state.params.q1, self.state.params.q2 )
+        return (self.state.params.policy, self.state.params.log_alpha, self.state.params.q1, self.state.params.q2)
 
     def get_policy_params_to_save(self):
         return (self.state.params.target_poicy, self.state.params.log_alpha, self.state.params.q1, self.state.params.q2)

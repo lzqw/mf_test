@@ -6,9 +6,10 @@ import jax, jax.numpy as jnp
 import haiku as hk
 import math
 
-from relax.network.blocks import Activation, DACERPolicyNet2, QNet
-from relax.utils.flow import MeanFlow
+from relax.network.blocks import Activation, DACERPolicyNet, QNet
+from relax.utils.flow import OTFlow
 from relax.utils.jax_utils import random_key_from_data
+
 
 class Diffv2Params(NamedTuple):
     q1: hk.Params
@@ -21,7 +22,7 @@ class Diffv2Params(NamedTuple):
 
 
 @dataclass
-class MFRNet:
+class RFSACNet:
     q: Callable[[hk.Params, jax.Array, jax.Array], jax.Array]
     policy: Callable[[hk.Params, jax.Array, jax.Array, jax.Array], jax.Array]
     num_timesteps: int
@@ -33,19 +34,18 @@ class MFRNet:
     noise_schedule: str
 
     @property
-    def flow(self) -> MeanFlow:
-        return MeanFlow(self.num_timesteps)
+    def flow(self) -> OTFlow:
+        return OTFlow(self.num_timesteps)
 
     @property
-    def flow_test(self) -> MeanFlow:
-        return MeanFlow(self.num_timesteps_test)
-
+    def flow_test(self) -> OTFlow:
+        return OTFlow(self.num_timesteps_test)
 
     def get_action(self, key: jax.Array, policy_params: hk.Params, obs: jax.Array) -> jax.Array:
         policy_params, log_alpha, q1_params, q2_params = policy_params
 
-        def model_fn(x, r, t):
-            return self.policy(policy_params, obs, x, r, t)
+        def model_fn(t, x):
+            return self.policy(policy_params, obs, x, t)
 
         def sample(key: jax.Array) -> Union[jax.Array, jax.Array]:
             act = self.flow.p_sample(key, model_fn, (*obs.shape[:-1], self.act_dim))
@@ -66,11 +66,10 @@ class MFRNet:
         return act
 
     def get_vanilla_action(self, key: jax.Array, policy_params: hk.Params, obs: jax.Array) -> jax.Array:
-
         policy_params, _, _, _ = policy_params
 
-        def model_fn(x, r, t):
-            return self.policy(policy_params, obs, x, r, t)
+        def model_fn(t, x):
+            return self.policy(policy_params, obs, x, t)
 
         def sample(key: jax.Array) -> Union[jax.Array, jax.Array]:
             act = self.flow.p_sample(key, model_fn, (*obs.shape[:-1], self.act_dim))
@@ -82,14 +81,26 @@ class MFRNet:
     def get_vanilla_action_step(self, key: jax.Array, policy_params: hk.Params, obs: jax.Array) -> jax.Array:
         policy_params, _, _, _ = policy_params
 
-        def model_fn(x, r, t):
-            return self.policy(policy_params, obs, x, r, t)
+        def model_fn(t, x):
+            return self.policy(policy_params, obs, x, t)
 
         def sample(key: jax.Array) -> Union[jax.Array, jax.Array]:
             act = self.flow_test.p_sample_traj(key, model_fn, (*obs.shape[:-1], self.act_dim))
             return act
 
         act = sample(key)
+        return act
+
+    def get_vanilla_action_fast(self, policy_params: hk.Params, obs: jax.Array) -> jax.Array:
+
+        def model_fn(t, x):
+            return self.policy(policy_params, obs, x, t)
+
+        def sample() -> Union[jax.Array, jax.Array]:
+            act = self.flow_test.p_sample_fast(model_fn, (*obs.shape[:-1], self.act_dim))
+            return act
+
+        act = sample()
         return act
 
     def get_deterministic_action(self, policy_params: hk.Params, obs: jax.Array) -> jax.Array:
@@ -100,7 +111,7 @@ class MFRNet:
         return self.get_action(key, policy_params, obs)
 
 
-def create_mfr_net(
+def create_rf_sac_net(
     key: jax.Array,
     obs_dim: int,
     act_dim: int,
@@ -111,10 +122,12 @@ def create_mfr_net(
     num_timesteps_test: int = 20,
     num_particles: int = 32,
     noise_scale: float = 0.05,
-    target_entropy_scale = 0.9,
-    ) -> Tuple[MFRNet, Diffv2Params]:
+    target_entropy_scale=0.9,
+) -> Tuple[RFSACNet, Diffv2Params]:
+    # q = hk.without_apply_rng(hk.transform(lambda obs, act: DistributionalQNet2(hidden_sizes, activation)(obs, act)))
     q = hk.without_apply_rng(hk.transform(lambda obs, act: QNet(hidden_sizes, activation)(obs, act)))
-    policy = hk.without_apply_rng(hk.transform(lambda obs, act, r, t: DACERPolicyNet2(diffusion_hidden_sizes, activation)(obs, act, r, t)))
+    policy = hk.without_apply_rng(
+        hk.transform(lambda obs, act, t: DACERPolicyNet(diffusion_hidden_sizes, activation)(obs, act, t)))
 
     @jax.jit
     def init(key, obs, act):
@@ -123,16 +136,18 @@ def create_mfr_net(
         q2_params = q.init(q2_key, obs, act)
         target_q1_params = q1_params
         target_q2_params = q2_params
-        policy_params = policy.init(policy_key, obs, act, 0, 0)
+        policy_params = policy.init(policy_key, obs, act, 0)
         target_policy_params = policy_params
-        log_alpha = jnp.array(math.log(5), dtype=jnp.float32) # math.log(3) or math.log(5) choose one
-        return Diffv2Params(q1_params, q2_params, target_q1_params, target_q2_params, policy_params, target_policy_params, log_alpha)
+        log_alpha = jnp.array(math.log(5), dtype=jnp.float32)  # math.log(3) or math.log(5) choose one
+        return Diffv2Params(q1_params, q2_params, target_q1_params, target_q2_params, policy_params,
+                            target_policy_params, log_alpha)
 
     sample_obs = jnp.zeros((1, obs_dim))
     sample_act = jnp.zeros((1, act_dim))
     params = init(key, sample_obs, sample_act)
 
-    net = MFRNet(q=q.apply, policy=policy.apply, num_timesteps=num_timesteps, num_timesteps_test=num_timesteps_test, act_dim=act_dim,
-                    target_entropy=-act_dim*target_entropy_scale, num_particles=num_particles, noise_scale=noise_scale,
-                    noise_schedule='linear')
+    net = RFSACNet(q=q.apply, policy=policy.apply, num_timesteps=num_timesteps, num_timesteps_test=num_timesteps_test,
+                act_dim=act_dim,
+                target_entropy=-act_dim * target_entropy_scale, num_particles=num_particles, noise_scale=noise_scale,
+                noise_schedule='linear')
     return net, params
