@@ -85,8 +85,16 @@ class SafePullbackRF2SACENT(Algorithm):
             p = state.params
             o = state.opt_state
 
-            k1, k2, k3 = jax.random.split(key, 3)
-            raw_next_action, entropy = self.agent.get_action_ent(k1, (p.policy, p.log_alpha, p.q1, p.q2), next_obs)
+            (
+                k_next,
+                k_qp_policy,
+                k_qp_uniform,
+                k_vp_policy,
+                k_clean,
+                k_noise,
+                k_t,
+            ) = jax.random.split(key, 7)
+            raw_next_action, entropy = self.agent.get_action_ent(k_next, (p.policy, p.log_alpha, p.q1, p.q2), next_obs)
             raw_next_action = jnp.clip(raw_next_action, -1.0, 1.0)
             exec_next_action, _, _ = project_action_jax_batched(next_obs, raw_next_action, self.action_grid, self.cfg)
 
@@ -108,12 +116,12 @@ class SafePullbackRF2SACENT(Algorithm):
             def qploss(qp):
                 pred = self.agent.get_qp(qp, obs, raw_action)
                 td_loss = jnp.mean((pred - jax.lax.stop_gradient(yp)) ** 2)
-                policy_keys = jax.random.split(k3, 8)
+                policy_keys = jax.random.split(k_qp_policy, 8)
                 cf_policy = jax.vmap(
                     lambda sk: self.agent.get_action(sk, (p.policy, p.log_alpha, p.q1, p.q2), obs)
                 )(policy_keys)
                 cf_policy = jnp.swapaxes(cf_policy, 0, 1)
-                cf_uniform = jax.random.uniform(k2, (obs.shape[0], 8, raw_action.shape[1]), minval=-1.0, maxval=1.0)
+                cf_uniform = jax.random.uniform(k_qp_uniform, (obs.shape[0], 8, raw_action.shape[1]), minval=-1.0, maxval=1.0)
                 cf_actions = jnp.concatenate([cf_policy, cf_uniform], axis=1)
                 cf_obs = jnp.repeat(obs[:, None, :], cf_actions.shape[1], axis=1)
                 cf_exec, _, _ = project_action_jax_batched(cf_obs, cf_actions, self.action_grid, self.cfg)
@@ -135,7 +143,7 @@ class SafePullbackRF2SACENT(Algorithm):
 
             def vploss(vp):
                 pred = self.agent.get_vp(vp, obs)
-                sample_keys = jax.random.split(k2, 8)
+                sample_keys = jax.random.split(k_vp_policy, 8)
                 policy_actions = jax.vmap(
                     lambda sk: self.agent.get_action(sk, (p.policy, p.log_alpha, p.q1, p.q2), obs)
                 )(sample_keys)
@@ -153,11 +161,11 @@ class SafePullbackRF2SACENT(Algorithm):
             obs_rep = jnp.repeat(obs[:, None, :], self.K, axis=1)
             obs_flat = obs_rep.reshape(-1, obs.shape[-1])
             clean_model_fn = lambda tt, xx: self.agent.policy(p.target_policy, obs_flat, xx, tt)
-            clean_flat = jnp.clip(self.agent.flow.p_sample(k1, clean_model_fn, (obs_flat.shape[0], raw_action.shape[-1])), -1.0, 1.0)
+            clean_flat = jnp.clip(self.agent.flow.p_sample(k_clean, clean_model_fn, (obs_flat.shape[0], raw_action.shape[-1])), -1.0, 1.0)
             clean = jax.lax.stop_gradient(clean_flat.reshape(obs.shape[0], self.K, raw_action.shape[-1]))
-            noise = jax.random.normal(k2, shape=clean.shape)
-            t = jax.random.uniform(k3, (obs.shape[0], self.K, 1), minval=1e-3, maxval=0.994)
-            noisy = jnp.clip(t * clean + (1 - t) * noise, -1.0, 1.0)
+            noise = jax.random.normal(k_noise, shape=clean.shape)
+            t = jax.random.uniform(k_t, (obs.shape[0], self.K, 1), minval=1e-3, maxval=0.994)
+            noisy = t * clean + (1 - t) * noise
             u = clean - noise
             exec_clean, _, _ = project_action_jax_batched(obs_rep, clean, self.action_grid, self.cfg)
 
@@ -169,12 +177,17 @@ class SafePullbackRF2SACENT(Algorithm):
             apr_batch = jnp.mean(d_proj)
             lambda_p_current = self.lambda_p * jnp.minimum(1.0, state.step / jnp.maximum(self.lambda_p_warmup_steps, 1))
 
-            c_cost = q_proj + self.mu_c * d_proj
-            compatibility = jnp.clip(jnp.exp(-c_cost / jnp.maximum(self.tau_c, 1e-6)), 1e-6, 1.0)
+            q_proj_for_score = jnp.maximum(q_proj, 0.0)
+            c_cost = q_proj_for_score + self.mu_c * d_proj
+            compatibility = jnp.clip(
+                jnp.exp(-c_cost / jnp.maximum(self.tau_c, 1e-6)),
+                1e-6,
+                1.0,
+            )
             a_r = q_reward - jnp.mean(q_reward, axis=1, keepdims=True)
             a_f = compatibility - jnp.mean(compatibility, axis=1, keepdims=True)
             frpi_score = compatibility * a_r + self.lambda_f * a_f
-            base_score = q_reward - lambda_p_current * q_proj - self.lambda_d * d_proj
+            base_score = q_reward - lambda_p_current * q_proj_for_score - self.lambda_d * d_proj
             score = jax.lax.stop_gradient(jnp.where(self.use_frpi_score, frpi_score, base_score))
             critic = score / jnp.maximum(alpha, 1e-3)
             w = jax.nn.softmax(jax.lax.stop_gradient(critic), axis=1)
@@ -193,9 +206,10 @@ class SafePullbackRF2SACENT(Algorithm):
                 flow_loss = self.agent.flow.reverse_weighted_p_loss2(denoiser, t_r, noisy_r, jax.lax.stop_gradient(w_r), jax.lax.stop_gradient(u_r))
                 if self.use_tn_energy:
                     v_pred = self.agent.policy(pp, obs_r, noisy_r, t_r)
-                    exec_xt, _, _ = project_action_jax_batched(obs_r, noisy_r, self.action_grid, self.cfg)
+                    noisy_r_for_filter = jnp.clip(noisy_r, -1.0, 1.0)
+                    exec_xt, _, _ = project_action_jax_batched(obs_r, noisy_r_for_filter, self.action_grid, self.cfg)
                     exec_xt = jax.lax.stop_gradient(exec_xt)
-                    delta = jax.lax.stop_gradient(exec_xt - noisy_r)
+                    delta = jax.lax.stop_gradient(exec_xt - noisy_r_for_filter)
                     r = jnp.linalg.norm(delta, axis=-1, keepdims=True)
                     n = delta / (r + 1e-6)
                     gate_denom = jnp.maximum(self.tn_r_max - self.tn_r_min, 1e-6)
@@ -251,6 +265,7 @@ class SafePullbackRF2SACENT(Algorithm):
                         lambda_p_current=lambda_p_current, FAR_batch=far_batch, APR_batch=apr_batch,
                         candidate_q_reward_mean=jnp.mean(q_reward),
                         candidate_q_projection_mean=jnp.mean(q_proj),
+                        candidate_q_projection_nonneg_mean=jnp.mean(q_proj_for_score),
                         candidate_projection_residual_mean=jnp.mean(residual_clean),
                         frpi_score_mean=jnp.mean(frpi_score),
                         compatibility_mean=jnp.mean(compatibility),
@@ -258,7 +273,8 @@ class SafePullbackRF2SACENT(Algorithm):
                         compatibility_max=jnp.max(compatibility),
                         tn_energy=tn_energy, tn_normal_energy=tn_normal_energy,
                         tn_tangent_energy=tn_tangent_energy, tn_gate_mean=tn_gate_mean,
-                        tn_residual_xt_mean=tn_residual_xt_mean)
+                        tn_residual_xt_mean=tn_residual_xt_mean,
+                        flow_loss=p_aux[0])
             return ns, info
 
         self._update = _update
