@@ -49,6 +49,9 @@ def make_algo(args, obs_dim=8, act_dim=2):
         sample_k=args.sample_k, lambda_p=args.lambda_p, use_projection_critic=args.use_projection_critic,
         fixed_alpha=args.fixed_alpha, alpha_value=args.alpha_value,
         lambda_p_warmup_steps=args.lambda_p_warmup_steps, lambda_d=args.lambda_d,
+        use_frpi_score=args.use_frpi_score, tau_c=args.tau_c, mu_c=args.mu_c, lambda_f=args.lambda_f,
+        use_tn_energy=args.use_tn_energy, tn_coef=args.tn_coef, sigma_n=args.sigma_n, sigma_t=args.sigma_t,
+        tn_r_min=args.tn_r_min, tn_r_max=args.tn_r_max, tn_clip=args.tn_clip, kappa_tn=args.kappa_tn,
     )
 
 
@@ -121,6 +124,18 @@ def main():
     p.add_argument('--lambda_p_warmup_steps', type=int, default=100000)
     p.add_argument('--lambda_d', type=float, default=0.5)
     p.add_argument('--eval_episodes', type=int, default=100)
+    p.add_argument('--use_frpi_score', action='store_true', default=False)
+    p.add_argument('--tau_c', type=float, default=1.0)
+    p.add_argument('--mu_c', type=float, default=1.0)
+    p.add_argument('--lambda_f', type=float, default=2.0)
+    p.add_argument('--use_tn_energy', action='store_true', default=False)
+    p.add_argument('--tn_coef', type=float, default=1.0)
+    p.add_argument('--sigma_n', type=float, default=0.2)
+    p.add_argument('--sigma_t', type=float, default=1.0)
+    p.add_argument('--tn_r_min', type=float, default=0.02)
+    p.add_argument('--tn_r_max', type=float, default=0.20)
+    p.add_argument('--tn_clip', type=float, default=10.0)
+    p.add_argument('--kappa_tn', type=float, default=1.0)
     args = p.parse_args()
     configure_algo_mode(args)
 
