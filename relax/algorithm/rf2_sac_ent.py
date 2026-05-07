@@ -121,9 +121,9 @@ class RF2SACENT(Algorithm):
             q2_target = self.agent.q(target_q2_params, next_obs, next_action)
 
             if self.fixed_alpha:
-                q_target = jnp.minimum(q1_target, q2_target)  - jnp.float32(self.alpha_value) * entropy
+                q_target = jnp.minimum(q1_target, q2_target)#  - jnp.float32(self.alpha_value) * entropy
             else:
-                q_target = jnp.minimum(q1_target, q2_target) - jnp.exp(log_alpha) * entropy
+                q_target = jnp.minimum(q1_target, q2_target)# - jnp.exp(log_alpha) * entropy
 
             q_backup = reward + (1 - done) * self.gamma * q_target
 
@@ -143,7 +143,12 @@ class RF2SACENT(Algorithm):
             flow_noise_key,noise_rng=jax.random.split(flow_noise_key,2)
             t = jax.random.uniform(flow_time_key, shape=(next_obs.shape[0],), minval=1e-3, maxval=0.9946)
             t = jnp.expand_dims(t, axis=1)
+
+            # uniform_key, key = jax.random.split(key)
+            # x_start_uniform = jax.random.uniform(uniform_key, shape=action.shape, minval=-1.0, maxval=1.0)
+            # action=x_start_uniform
             noise_sample = jax.random.normal(flow_noise_key, action.shape)
+
 
 
             def q_sample(t: int, x_start: jax.Array, noise: jax.Array):
@@ -189,14 +194,32 @@ class RF2SACENT(Algorithm):
             t_reshape = jnp.repeat(t.squeeze(), repeats=self.K)
             noisy_actions_reshape=noisy_actions_repeat.reshape(-1, noisy_actions_repeat.shape[-1])
             weight_reshape=q_weights.reshape(-1,1)
+            d = action.shape[-1]  # 获取动作维度 d
+            t_factor = jnp.power(t_reshape, -d).reshape(-1, 1)  # shape: (batch_size * K, 1)
+
+            # 【实验版本 1: Exact t^(-d)】严格相乘，高维极大概率直接 NaN
+            exact_weight_reshape = weight_reshape * t_factor
+
+            # 【实验版本 2: Clipped t^(-d)】对权重进行硬截断，防止程序崩溃但破坏了分布
+            # exact_weight_reshape = weight_reshape * jnp.clip(t_factor, a_max=1e4)
+
+            # 【默认版本 (Ours)】不乘 t_factor，即下方的传参保持 weight_reshape
+            # ===============================================================
+
+
             #clean_samples: batch_size, K, action_dim,
             def policy_loss_fn(policy_params) -> jax.Array:
 
                 def denoiser(t, x):
                     return self.agent.policy(policy_params, obs_reshape, x, t)
+                #loss = self.agent.flow.reverse_weighted_p_loss2(denoiser, t_reshape, noisy_actions_reshape,
+                #                                                jax.lax.stop_gradient(weight_reshape),
+                #                                            jax.lax.stop_gradient(u))
+
+
                 loss = self.agent.flow.reverse_weighted_p_loss2(denoiser, t_reshape, noisy_actions_reshape,
-                                                                jax.lax.stop_gradient(weight_reshape),
-                                                            jax.lax.stop_gradient(u))
+                                                                jax.lax.stop_gradient(exact_weight_reshape), # <--- 修改这里
+                                                                jax.lax.stop_gradient(u))
                 """
                     def reverse_weighted_p_loss(self,  model: FlowModel, t: jax.Array,
                         x_t: jax.Array, u_estimation:jax.Array):

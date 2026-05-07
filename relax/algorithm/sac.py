@@ -89,7 +89,7 @@ class SAC(Algorithm):
 
             # update alpha
             def log_alpha_loss_fn(log_alpha: jax.Array) -> jax.Array:
-                log_alpha_loss = -jnp.mean(log_alpha * (new_logp + self.agent.target_entropy))
+                log_alpha_loss = jnp.mean(log_alpha * (-new_logp - self.agent.target_entropy))
                 return log_alpha_loss
 
             log_alpha_grads = jax.grad(log_alpha_loss_fn)(log_alpha)
@@ -112,6 +112,7 @@ class SAC(Algorithm):
                 "policy_loss": policy_loss,
                 "entropy": -jnp.mean(new_logp),
                 "alpha": jnp.exp(log_alpha),
+                "alpha_loss":jnp.mean(new_logp - self.agent.target_entropy)
             }
             return state, info
 

@@ -85,10 +85,10 @@ def str2bool(v):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     # 算法选择
-    parser.add_argument("--alg", type=str, default="sac")
+    parser.add_argument("--alg", type=str, default="mf2")
 
     # 环境设置 (请使用 register.py 中注册的向量环境 ID，如 dm_control_vector_walker_walk-v0)
-    parser.add_argument("--env", type=str, default="dm_control_vector_dog_walk-v0")
+    parser.add_argument("--env", type=str, default="dm_control_vector_dog_trot-v0")
     #dm_control_vector_dog_walk-v0
     #dm_control_vector_humanoid_walk-v0
     #dm_control_vector_manipulator_insert_ball-v0
@@ -106,25 +106,25 @@ if __name__ == "__main__":
     parser.add_argument("--num_ent_timesteps", type=int,
                         default=10)  # The same as diffusion steps for rf. For mf based algorithms, set 5 or 4
     parser.add_argument("--num_particles", type=int, default=32)
-    parser.add_argument("--noise_scale", type=float, default=1.0)
+    parser.add_argument("--noise_scale", type=float, default=0.001)
 
     # 训练超参数
-    parser.add_argument("--start_step", type=int, default=int(5e4))
+    parser.add_argument("--start_step", type=int, default=int(3e4))
     parser.add_argument("--total_step", type=int, default=int(3e6))
-    parser.add_argument("--lr", type=float, default=3e-4)
+    parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--lr_schedule_end", type=float, default=3e-5)
     parser.add_argument("--alpha_lr", type=float, default=0.005)  # 注意：这里根据参考代码设为了 0.005
-    parser.add_argument("--delay_alpha_update", type=float, default=10)
-    parser.add_argument("--seed", type=int, default=200)
+    parser.add_argument("--delay_alpha_update", type=float, default=50)
+    parser.add_argument("--seed", type=int, default=2)
     parser.add_argument("--replay_buffer_size", type=int, default=int(1e6))
     parser.add_argument("--use_ema_policy", default=True, action="store_true")
 
     # Entropy / Reweighting 参数
-    parser.add_argument("--target_entropy_scale", type=float, default=1.0)
+    parser.add_argument("--target_entropy_scale", type=float, default=2.0)
     parser.add_argument("--sample_k", type=int, default=200)
-    parser.add_argument("--fix_alpha", type=str2bool, default=False)
-    parser.add_argument("--alpha", type=float, default=1.0)
-    parser.add_argument("--init_alpha", type=float, default=1.0)
+    parser.add_argument("--fix_alpha", type=str2bool, default=True)
+    parser.add_argument("--alpha", type=float, default=0.01)
+    parser.add_argument("--init_alpha", type=float, default=2.0)
 
     parser.add_argument("--debug", default=False, action='store_true')  # 修正了 debug 参数定义
     args = parser.parse_args()
@@ -334,6 +334,7 @@ if __name__ == "__main__":
                               use_ema=args.use_ema_policy,
                               sample_k=args.sample_k,
                               alpha_value=args.alpha,
+                              reward_scale=1.0,
                               fixed_alpha=args.fix_alpha)
 
     elif args.alg == 'mf_sac_ent':
