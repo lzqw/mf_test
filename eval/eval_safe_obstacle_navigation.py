@@ -34,6 +34,9 @@ def make_algo(args, obs_dim=8, act_dim=2):
         sample_k=args.sample_k, lambda_p=args.lambda_p, use_projection_critic=args.use_projection_critic,
         fixed_alpha=args.fixed_alpha, alpha_value=args.alpha_value,
         lambda_p_warmup_steps=args.lambda_p_warmup_steps, lambda_d=args.lambda_d,
+        use_frpi_score=args.use_frpi_score, tau_c=args.tau_c, mu_c=args.mu_c, lambda_f=args.lambda_f,
+        use_tn_energy=args.use_tn_energy, tn_coef=args.tn_coef, sigma_n=args.sigma_n, sigma_t=args.sigma_t,
+        tn_r_min=args.tn_r_min, tn_r_max=args.tn_r_max, tn_clip=args.tn_clip, kappa_tn=args.kappa_tn,
     )
 
 
@@ -53,14 +56,20 @@ def load_agent(checkpoint_path, algo):
             'fixed_alpha': False, 'init_alpha': 0.01, 'gamma': 0.99, 'gamma_p': 0.99, 'lr': 3e-4,
             'alpha_lr': 1e-2, 'sample_k': 64, 'lambda_p': 1.0, 'use_projection_critic': True,
             'lambda_p_warmup_steps': 100000, 'lambda_d': 0.5,
+            'use_frpi_score': False, 'tau_c': 1.0, 'mu_c': 1.0, 'lambda_f': 2.0,
+            'use_tn_energy': False, 'tn_coef': 1.0, 'sigma_n': 0.2, 'sigma_t': 1.0,
+            'tn_r_min': 0.02, 'tn_r_max': 0.20, 'tn_clip': 10.0, 'kappa_tn': 1.0,
         }
+    defaults = {'use_frpi_score': False, 'tau_c': 1.0, 'mu_c': 1.0, 'lambda_f': 2.0, 'use_tn_energy': False, 'tn_coef': 1.0, 'sigma_n': 0.2, 'sigma_t': 1.0, 'tn_r_min': 0.02, 'tn_r_max': 0.20, 'tn_clip': 10.0, 'kappa_tn': 1.0}
+    for k, v in defaults.items():
+        saved_args.setdefault(k, v)
     args = argparse.Namespace(**saved_args)
     agent = make_algo(args)
     agent.state = ckpt['agent_state']
     return agent
 
 
-def run_evaluation(agent, algo, eval_episodes=200, seed=0):
+def run_evaluation(agent, algo, eval_episodes=200, seed=0, effective_entropy_tau_res=0.1):
     env = SafeObstacleNavigation2DEnv(use_filter=algo != 'rf2_no_filter', seed=seed)
     key = jax.random.PRNGKey(seed + 123)
     T, N = env.episode_len, eval_episodes
@@ -105,6 +114,18 @@ def run_evaluation(agent, algo, eval_episodes=200, seed=0):
     ns = max(len(routes), 1)
     p_up, p_low = upper / ns, lower / ns
     route_entropy = -(p_up * np.log(p_up + 1e-8) + p_low * np.log(p_low + 1e-8))
+    success_idx = np.where(is_success)[0]
+    if success_idx.size > 0:
+        succ_routes = [classify_route(positions[i, :time_to_goal[i] + 1]) for i in success_idx]
+        succ_res = np.array([np.mean(projection_residual[i, :time_to_goal[i]]) for i in success_idx], dtype=np.float32)
+        weights = np.exp(-succ_res / max(effective_entropy_tau_res, 1e-6))
+        wsum = max(float(np.sum(weights)), 1e-8)
+        p_up_eff = float(np.sum(weights * (np.array(succ_routes) == 'upper').astype(np.float32)) / wsum)
+        p_low_eff = float(np.sum(weights * (np.array(succ_routes) == 'lower').astype(np.float32)) / wsum)
+    else:
+        p_up_eff, p_low_eff = 0.0, 0.0
+    effective_route_entropy = -(p_up_eff * np.log(p_up_eff + 1e-8) + p_low_eff * np.log(p_low_eff + 1e-8))
+
     step_mask = (np.arange(T)[None, :] < (valid_lengths - 1)[:, None])
     valid_step_count = max(int(step_mask.sum()), 1)
     return {
@@ -115,6 +136,9 @@ def run_evaluation(agent, algo, eval_episodes=200, seed=0):
         'APR': float(np.sum(projection_residual * step_mask) / valid_step_count),
         'feasible_raw_action_ratio': float(np.sum((1 - safe_violation.astype(np.float32)) * step_mask) / valid_step_count),
         'route_entropy': float(route_entropy),
+        'effective_route_upper_ratio': float(p_up_eff),
+        'effective_route_lower_ratio': float(p_low_eff),
+        'effective_route_entropy': float(effective_route_entropy),
     }
 
 
@@ -124,6 +148,7 @@ def main():
     p.add_argument('--algo', required=True)
     p.add_argument('--eval_episodes', type=int, default=200)
     p.add_argument('--save_dir', required=True)
+    p.add_argument('--effective_entropy_tau_res', type=float, default=0.1)
     args = p.parse_args()
 
     save_dir = Path(args.save_dir)
@@ -202,6 +227,18 @@ def main():
 
     step_mask = (np.arange(T)[None, :] < (valid_lengths - 1)[:, None])
     valid_step_count = max(int(step_mask.sum()), 1)
+    success_idx = np.where(is_success)[0]
+    if success_idx.size > 0:
+        succ_routes = [classify_route(positions[i, :time_to_goal[i] + 1]) for i in success_idx]
+        succ_res = np.array([np.mean(projection_residual[i, :time_to_goal[i]]) for i in success_idx], dtype=np.float32)
+        weights = np.exp(-succ_res / max(args.effective_entropy_tau_res, 1e-6))
+        wsum = max(float(np.sum(weights)), 1e-8)
+        p_up_eff = float(np.sum(weights * (np.array(succ_routes) == 'upper').astype(np.float32)) / wsum)
+        p_low_eff = float(np.sum(weights * (np.array(succ_routes) == 'lower').astype(np.float32)) / wsum)
+    else:
+        p_up_eff, p_low_eff = 0.0, 0.0
+    effective_route_entropy = -(p_up_eff * np.log(p_up_eff + 1e-8) + p_low_eff * np.log(p_low_eff + 1e-8))
+
     summary = {
         'success_rate': float(np.mean(is_success)),
         'collision_rate': float(np.mean(np.any((distance_to_obstacle < 0.0) & step_mask, axis=1))),
@@ -215,6 +252,9 @@ def main():
         'route_upper_ratio': float(p_up),
         'route_lower_ratio': float(p_low),
         'route_entropy': float(route_entropy),
+        'effective_route_upper_ratio': float(p_up_eff),
+        'effective_route_lower_ratio': float(p_low_eff),
+        'effective_route_entropy': float(effective_route_entropy),
     }
     (save_dir / 'summary.json').write_text(json.dumps(summary, indent=2))
 

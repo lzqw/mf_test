@@ -29,7 +29,10 @@ class SafePullbackRF2SACENT(Algorithm):
     def __init__(self, agent: SafePullbackRF2SACENTNet, params: SafePullbackRF2Params, gamma=0.99, gamma_p=0.99,
                  lr=3e-4, alpha_lr=1e-2, tau=0.005, reward_scale=1.0, sample_k=64, lambda_p=1.0,
                  use_projection_critic=True, fixed_alpha=False, alpha_value=0.01,
-                 lambda_p_warmup_steps=100000, lambda_d=0.5):
+                 lambda_p_warmup_steps=100000, lambda_d=0.5,
+                 use_frpi_score=False, tau_c=1.0, mu_c=1.0, lambda_f=2.0,
+                 use_tn_energy=False, tn_coef=1.0, sigma_n=0.2, sigma_t=1.0,
+                 tn_r_min=0.02, tn_r_max=0.20, tn_clip=10.0, kappa_tn=1.0):
         self.agent = agent
         self.gamma = gamma
         self.gamma_p = gamma_p
@@ -42,6 +45,18 @@ class SafePullbackRF2SACENT(Algorithm):
         self.lambda_d = lambda_d
         self.fixed_alpha = fixed_alpha
         self.alpha_value = alpha_value
+        self.use_frpi_score = use_frpi_score
+        self.tau_c = tau_c
+        self.mu_c = mu_c
+        self.lambda_f = lambda_f
+        self.use_tn_energy = use_tn_energy
+        self.tn_coef = tn_coef
+        self.sigma_n = sigma_n
+        self.sigma_t = sigma_t
+        self.tn_r_min = tn_r_min
+        self.tn_r_max = tn_r_max
+        self.tn_clip = tn_clip
+        self.kappa_tn = kappa_tn
         self.optim = optax.adam(lr)
         self.policy_optim = optax.adam(lr)
         self.alpha_optim = optax.adam(alpha_lr)
@@ -135,43 +150,70 @@ class SafePullbackRF2SACENT(Algorithm):
                 vp_loss, vp_pred = jnp.float32(0.0), jnp.zeros_like(reward)
                 vp_grads = jax.tree_util.tree_map(jnp.zeros_like, p.vp)
 
-            t = jax.random.uniform(k2, (obs.shape[0], 1), minval=1e-3, maxval=0.994)
-            noise = jax.random.normal(k3, raw_action.shape)
-            noisy = jnp.clip(t * raw_action + (1 - t) * noise, -1.0, 1.0)
-            noisy_rep = jnp.repeat(noisy[:, None, :], self.K, axis=1)
             obs_rep = jnp.repeat(obs[:, None, :], self.K, axis=1)
-            std = jnp.expand_dims((1 - t) / jnp.maximum(t, 1e-6), axis=-1)
-            lower_bound = noisy_rep / jnp.maximum(1 - t[:, :, None], 1e-6) - (1.0 / jnp.maximum(std, 1e-6))
-            upper_bound = noisy_rep / jnp.maximum(1 - t[:, :, None], 1e-6) + (1.0 / jnp.maximum(std, 1e-6))
-            trunc_noise = jax.random.truncated_normal(k1, lower=lower_bound, upper=upper_bound, shape=(raw_action.shape[0], self.K, raw_action.shape[1]))
-            normal_noise = jax.random.normal(k2, shape=(raw_action.shape[0], self.K, raw_action.shape[1]))
-            noise_k = jnp.where(jnp.isnan(trunc_noise), jnp.clip(normal_noise, lower_bound, upper_bound), trunc_noise)
-            clean = jnp.clip(noisy_rep / jnp.maximum(t[:, :, None], 1e-6) - std * noise_k, -1.0, 1.0)
+            obs_flat = obs_rep.reshape(-1, obs.shape[-1])
+            clean_model_fn = lambda tt, xx: self.agent.policy(p.target_policy, obs_flat, xx, tt)
+            clean_flat = jnp.clip(self.agent.flow.p_sample(k1, clean_model_fn, (obs_flat.shape[0], raw_action.shape[-1])), -1.0, 1.0)
+            clean = jax.lax.stop_gradient(clean_flat.reshape(obs.shape[0], self.K, raw_action.shape[-1]))
+            noise = jax.random.normal(k2, shape=clean.shape)
+            t = jax.random.uniform(k3, (obs.shape[0], self.K, 1), minval=1e-3, maxval=0.994)
+            noisy = jnp.clip(t * clean + (1 - t) * noise, -1.0, 1.0)
+            u = clean - noise
             exec_clean, _, _ = project_action_jax_batched(obs_rep, clean, self.action_grid, self.cfg)
 
             q_reward = jnp.minimum(self.agent.q(p.q1, obs_rep, exec_clean), self.agent.q(p.q2, obs_rep, exec_clean))
             q_proj = self.agent.get_qp(p.qp, obs_rep, clean) if self.use_projection_critic else jnp.zeros_like(q_reward)
-            d_proj = jnp.sum((clean - exec_clean) ** 2, axis=-1)
+            residual_clean = jnp.linalg.norm(exec_clean - clean, axis=-1)
+            d_proj = residual_clean ** 2
             far_batch = jnp.mean((d_proj > 1e-8).astype(jnp.float32))
             apr_batch = jnp.mean(d_proj)
             lambda_p_current = self.lambda_p * jnp.minimum(1.0, state.step / jnp.maximum(self.lambda_p_warmup_steps, 1))
-            score = jax.lax.stop_gradient(q_reward - lambda_p_current * q_proj - self.lambda_d * d_proj)
-            critic = score / jnp.maximum(alpha, 1e-3)
-            w = jnp.exp(critic - jax.nn.logsumexp(critic, axis=1, keepdims=True))
 
-            obs_r = obs_rep.reshape(-1, obs.shape[-1])
+            c_cost = q_proj + self.mu_c * d_proj
+            compatibility = jnp.clip(jnp.exp(-c_cost / jnp.maximum(self.tau_c, 1e-6)), 1e-6, 1.0)
+            a_r = q_reward - jnp.mean(q_reward, axis=1, keepdims=True)
+            a_f = compatibility - jnp.mean(compatibility, axis=1, keepdims=True)
+            frpi_score = compatibility * a_r + self.lambda_f * a_f
+            base_score = q_reward - lambda_p_current * q_proj - self.lambda_d * d_proj
+            score = jax.lax.stop_gradient(jnp.where(self.use_frpi_score, frpi_score, base_score))
+            critic = score / jnp.maximum(alpha, 1e-3)
+            w = jax.nn.softmax(jax.lax.stop_gradient(critic), axis=1)
+
+            obs_r = obs_flat
             clean_r = clean.reshape(-1, raw_action.shape[-1])
-            noisy_r = noisy_rep.reshape(-1, raw_action.shape[-1])
-            t_r = jnp.repeat(t.squeeze(-1), self.K)
+            noisy_r = noisy.reshape(-1, raw_action.shape[-1])
+            t_r = t.reshape(-1)
             w_r = w.reshape(-1, 1)
-            u_r = clean_r - noisy_r
+            u_r = u.reshape(-1, raw_action.shape[-1])
+
+            tn_energy = tn_normal_energy = tn_tangent_energy = tn_gate_mean = tn_residual_xt_mean = jnp.float32(0.0)
 
             def ploss(pp):
                 denoiser = lambda tt, xx: self.agent.policy(pp, obs_r, xx, tt)
-                loss = self.agent.flow.reverse_weighted_p_loss2(denoiser, t_r, noisy_r, jax.lax.stop_gradient(w_r), jax.lax.stop_gradient(u_r))
-                return loss
+                flow_loss = self.agent.flow.reverse_weighted_p_loss2(denoiser, t_r, noisy_r, jax.lax.stop_gradient(w_r), jax.lax.stop_gradient(u_r))
+                if self.use_tn_energy:
+                    v_pred = self.agent.policy(pp, obs_r, noisy_r, t_r)
+                    exec_xt, _, _ = project_action_jax_batched(obs_r, noisy_r, self.action_grid, self.cfg)
+                    exec_xt = jax.lax.stop_gradient(exec_xt)
+                    delta = jax.lax.stop_gradient(exec_xt - noisy_r)
+                    r = jnp.linalg.norm(delta, axis=-1, keepdims=True)
+                    n = delta / (r + 1e-6)
+                    gate_denom = jnp.maximum(self.tn_r_max - self.tn_r_min, 1e-6)
+                    gate = jnp.clip((r - self.tn_r_min) / gate_denom, 0.0, 1.0)
+                    b = self.kappa_tn * delta
+                    vn = jnp.sum(n * (v_pred - b), axis=-1, keepdims=True)
+                    normal_sq = jnp.minimum(vn ** 2, self.tn_clip)
+                    e_n = gate * normal_sq / (2.0 * jnp.maximum(self.sigma_n ** 2, 1e-6))
+                    v_dot_n = jnp.sum(n * v_pred, axis=-1, keepdims=True)
+                    v_norm2 = jnp.sum(v_pred ** 2, axis=-1, keepdims=True)
+                    tangent_sq = jnp.maximum(v_norm2 - v_dot_n ** 2, 0.0)
+                    e_t = tangent_sq / (2.0 * jnp.maximum(self.sigma_t ** 2, 1e-6))
+                    tne = jnp.mean(e_n + e_t)
+                    return flow_loss + alpha * self.tn_coef * tne, (flow_loss, tne, jnp.mean(e_n), jnp.mean(e_t), jnp.mean(gate), jnp.mean(r))
+                return flow_loss, (flow_loss, jnp.float32(0.0), jnp.float32(0.0), jnp.float32(0.0), jnp.float32(0.0), jnp.float32(0.0))
 
-            policy_loss, policy_grads = jax.value_and_grad(ploss)(p.policy)
+            (policy_loss, p_aux), policy_grads = jax.value_and_grad(ploss, has_aux=True)(p.policy)
+            _, tn_energy, tn_normal_energy, tn_tangent_energy, tn_gate_mean, tn_residual_xt_mean = p_aux
 
             def aloss(log_alpha):
                 return jnp.mean(log_alpha * (jnp.mean(entropy) - self.agent.target_entropy))
@@ -206,7 +248,17 @@ class SafePullbackRF2SACENT(Algorithm):
                         projection_cost_batch=jnp.mean(projection_cost),
                         safe_pullback_score_mean=jnp.mean(score),
                         qp_td_loss=qp_aux["td_loss"], qp_cf_loss=qp_aux["l_cf"], qp_lb_loss=qp_aux["lb"],
-                        lambda_p_current=lambda_p_current, FAR_batch=far_batch, APR_batch=apr_batch)
+                        lambda_p_current=lambda_p_current, FAR_batch=far_batch, APR_batch=apr_batch,
+                        candidate_q_reward_mean=jnp.mean(q_reward),
+                        candidate_q_projection_mean=jnp.mean(q_proj),
+                        candidate_projection_residual_mean=jnp.mean(residual_clean),
+                        frpi_score_mean=jnp.mean(frpi_score),
+                        compatibility_mean=jnp.mean(compatibility),
+                        compatibility_min=jnp.min(compatibility),
+                        compatibility_max=jnp.max(compatibility),
+                        tn_energy=tn_energy, tn_normal_energy=tn_normal_energy,
+                        tn_tangent_energy=tn_tangent_energy, tn_gate_mean=tn_gate_mean,
+                        tn_residual_xt_mean=tn_residual_xt_mean)
             return ns, info
 
         self._update = _update
