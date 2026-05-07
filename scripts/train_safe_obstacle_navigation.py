@@ -8,7 +8,24 @@ from typing import NamedTuple
 import jax
 import jax.numpy as jnp
 import numpy as np
-from tensorboardX import SummaryWriter
+try:
+    from tensorboardX import SummaryWriter
+except ImportError:
+    try:
+        from torch.utils.tensorboard import SummaryWriter
+    except ImportError:
+        class SummaryWriter:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def add_scalar(self, *args, **kwargs):
+                pass
+
+            def flush(self):
+                pass
+
+            def close(self):
+                pass
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -63,11 +80,9 @@ def configure_algo_mode(args):
     elif args.algo == 'safe_pullback_rf2':
         args.use_filter = True
         args.use_projection_critic = True
-        args.lambda_p = 1.0
     elif args.algo == 'safe_pullback_rf2_no_entropy':
         args.use_filter = True
         args.use_projection_critic = True
-        args.lambda_p = 1.0
         args.fixed_alpha = True
         args.alpha_value = 0.01
     elif args.algo == 'rf2_no_filter':
