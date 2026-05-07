@@ -165,6 +165,7 @@ class SafePullbackRF2SACENT(Algorithm):
                 raw_next_action, safe_energy_next, safe_n_next, safe_t_next, safe_iso_next, safe_gate_next, safe_residual_next = sample_action_with_safe_energy(k_next, p.policy, next_obs)
             else:
                 raw_next_action, entropy = self.agent.get_action_ent(k_next, (p.policy, p.log_alpha, p.q1, p.q2), next_obs)
+                raw_next_action = jnp.clip(raw_next_action, -1.0, 1.0)
                 entropy_total = entropy
             exec_next_action, _, _ = project_action_jax_batched(next_obs, raw_next_action, self.action_grid, self.cfg)
 
@@ -386,6 +387,11 @@ class SafePullbackRF2SACENT(Algorithm):
                         candidate_weight_entropy_norm=jnp.mean(h_w_norm),
                         candidate_weight_ess=jnp.mean(ess),
                         candidate_weight_max=jnp.mean(w_max),
+                        entropy_reg_mode_id=jnp.float32(
+                            0.0 if self.entropy_reg_mode == "legacy"
+                            else 1.0 if self.entropy_reg_mode == "likelihood_tn"
+                            else 2.0
+                        ),
                         entropy_total_mean=jnp.mean(entropy_total),
                         effective_entropy_mean=jnp.mean(effective_entropy),
                         normal_entropy_penalty_mean=jnp.mean(normal_entropy_penalty),
