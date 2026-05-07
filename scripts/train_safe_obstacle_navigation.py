@@ -69,6 +69,11 @@ def make_algo(args, obs_dim=8, act_dim=2):
         use_frpi_score=args.use_frpi_score, tau_c=args.tau_c, mu_c=args.mu_c, lambda_f=args.lambda_f,
         use_tn_energy=args.use_tn_energy, tn_coef=args.tn_coef, sigma_n=args.sigma_n, sigma_t=args.sigma_t,
         tn_r_min=args.tn_r_min, tn_r_max=args.tn_r_max, tn_clip=args.tn_clip, kappa_tn=args.kappa_tn,
+        entropy_reg_mode=args.entropy_reg_mode, candidate_temp=args.candidate_temp,
+        beta_normal_entropy=args.beta_normal_entropy, min_effective_entropy=args.min_effective_entropy,
+        target_effective_entropy=args.target_effective_entropy, normal_energy_coef=args.normal_energy_coef,
+        target_safe_energy=args.target_safe_energy, safe_iso_coef=args.safe_iso_coef,
+        safe_energy_variant=args.safe_energy_variant,
     )
 
 
@@ -151,6 +156,15 @@ def main():
     p.add_argument('--tn_r_max', type=float, default=0.20)
     p.add_argument('--tn_clip', type=float, default=10.0)
     p.add_argument('--kappa_tn', type=float, default=1.0)
+    p.add_argument('--entropy_reg_mode', choices=['legacy', 'likelihood_tn', 'flac_tn'], default='legacy')
+    p.add_argument('--candidate_temp', type=float, default=0.10)
+    p.add_argument('--beta_normal_entropy', type=float, default=1.0)
+    p.add_argument('--min_effective_entropy', type=float, default=-20.0)
+    p.add_argument('--target_effective_entropy', type=float, default=1.0)
+    p.add_argument('--normal_energy_coef', type=float, default=0.05)
+    p.add_argument('--target_safe_energy', type=float, default=0.05)
+    p.add_argument('--safe_iso_coef', type=float, default=0.05)
+    p.add_argument('--safe_energy_variant', choices=['normal_iso', 'normal_tangent'], default='normal_iso')
     args = p.parse_args()
     configure_algo_mode(args)
 
