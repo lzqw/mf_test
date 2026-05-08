@@ -103,10 +103,8 @@ class SafePullbackRF2SACENT(Algorithm):
                 k_qp_policy,
                 k_qp_uniform,
                 k_vp_policy,
-                k_clean,
-                k_noise,
-                k_t,
-            ) = jax.random.split(key, 7)
+                k2,
+            ) = jax.random.split(key, 5)
             def compute_filter_aware_energy_at_points(obs_point, x_point, v_pred):
                 x_for_filter = jnp.clip(x_point, -1.0, 1.0)
                 exec_x, _, _ = project_action_jax_batched(obs_point, x_for_filter, self.action_grid, self.cfg)
@@ -173,7 +171,7 @@ class SafePullbackRF2SACENT(Algorithm):
             q2_t = self.agent.q(p.target_q2, next_obs, exec_next_action)
             min_q_t = jnp.minimum(q1_t, q2_t)
             if self.entropy_reg_mode == "legacy":
-                q_backup = reward * self.reward_scale + (1.0 - done) * self.gamma * (min_q_t - alpha * entropy)
+                q_backup = reward * self.reward_scale + (1.0 - done) * self.gamma * (min_q_t + alpha * entropy)
             elif self.entropy_reg_mode == "likelihood_tn":
                 t_terminal = jnp.ones((next_obs.shape[0],), dtype=jnp.float32) * 0.999
                 v_terminal = self.agent.policy(p.policy, next_obs, raw_next_action, t_terminal)
@@ -239,51 +237,78 @@ class SafePullbackRF2SACENT(Algorithm):
                 vp_loss, vp_pred = jnp.float32(0.0), jnp.zeros_like(reward)
                 vp_grads = jax.tree_util.tree_map(jnp.zeros_like, p.vp)
 
-            obs_rep = jnp.repeat(obs[:, None, :], self.K, axis=1)
-            obs_flat = obs_rep.reshape(-1, obs.shape[-1])
-            clean_model_fn = lambda tt, xx: self.agent.policy(p.target_policy, obs_flat, xx, tt)
-            clean_flat = jnp.clip(self.agent.flow.p_sample(k_clean, clean_model_fn, (obs_flat.shape[0], raw_action.shape[-1])), -1.0, 1.0)
-            clean = jax.lax.stop_gradient(clean_flat.reshape(obs.shape[0], self.K, raw_action.shape[-1]))
-            noise = jax.random.normal(k_noise, shape=clean.shape)
-            t = jax.random.uniform(k_t, (obs.shape[0], self.K, 1), minval=1e-3, maxval=0.994)
-            noisy = t * clean + (1 - t) * noise
-            u = clean - noise
-            exec_clean, _, _ = project_action_jax_batched(obs_rep, clean, self.action_grid, self.cfg)
+            # -------- Candidate actions for Q-weighted flow update --------
+            batch_size = obs.shape[0]
+            act_dim = raw_action.shape[-1]
 
-            q_reward = jnp.minimum(self.agent.q(p.q1, obs_rep, exec_clean), self.agent.q(p.q2, obs_rep, exec_clean))
-            q_proj = self.agent.get_qp(p.qp, obs_rep, clean) if self.use_projection_critic else jnp.zeros_like(q_reward)
-            residual_clean = jnp.linalg.norm(exec_clean - clean, axis=-1)
-            d_proj = residual_clean ** 2
-            far_batch = jnp.mean((d_proj > 1e-8).astype(jnp.float32))
-            apr_batch = jnp.mean(d_proj)
-            lambda_p_current = self.lambda_p * jnp.minimum(1.0, state.step / jnp.maximum(self.lambda_p_warmup_steps, 1))
+            k_t, k_noise, k_rand = jax.random.split(k2, 3)
 
-            q_proj_for_score = jnp.maximum(q_proj, 0.0)
-            c_cost = q_proj_for_score + self.mu_c * d_proj
-            compatibility = jnp.clip(
-                jnp.exp(-c_cost / jnp.maximum(self.tau_c, 1e-6)),
-                1e-6,
-                1.0,
+            t = jax.random.uniform(
+                k_t,
+                (batch_size, self.K, 1),
+                minval=1e-3,
+                maxval=0.994,
             )
-            a_r = q_reward - jnp.mean(q_reward, axis=1, keepdims=True)
-            a_f = compatibility - jnp.mean(compatibility, axis=1, keepdims=True)
-            frpi_score = compatibility * a_r + self.lambda_f * a_f
-            base_score = q_reward - lambda_p_current * q_proj_for_score - self.lambda_d * d_proj
-            score = jax.lax.stop_gradient(jnp.where(self.use_frpi_score, frpi_score, base_score))
-            critic = score / jnp.maximum(self.candidate_temp, 1e-3)
-            w = jax.nn.softmax(jax.lax.stop_gradient(critic), axis=1)
-            w_safe = jnp.clip(w, 1e-8, 1.0)
-            h_w = -jnp.sum(w * jnp.log(w_safe), axis=1)
-            h_w_norm = h_w / jnp.maximum(jnp.log(jnp.float32(self.K)), 1e-8)
-            ess = 1.0 / jnp.sum(w ** 2, axis=1)
-            w_max = jnp.max(w, axis=1)
 
-            obs_r = obs_flat
+            random_clean = jax.random.uniform(
+                k_rand,
+                (batch_size, self.K - 1, act_dim),
+                minval=-1.0,
+                maxval=1.0,
+            )
+
+            clean = jnp.concatenate(
+                [raw_action[:, None, :], random_clean],
+                axis=1,
+            )
+
+            noise = jax.random.normal(k_noise, clean.shape)
+            noisy_rep = t * clean + (1.0 - t) * noise
+
+            obs_rep = jnp.repeat(obs[:, None, :], self.K, axis=1)
+
+            exec_clean, _, projection_residual_candidates = project_action_jax_batched(
+                obs_rep, clean, self.action_grid, self.cfg
+            )
+
+            q_reward = jnp.minimum(
+                self.agent.q(p.q1, obs_rep, exec_clean),
+                self.agent.q(p.q2, obs_rep, exec_clean),
+            )
+
+            q_proj = (
+                self.agent.get_qp(p.qp, obs_rep, clean)
+                if self.use_projection_critic
+                else jnp.zeros_like(q_reward)
+            )
+
+            pos = obs_rep[..., 0:2]
+            goal = jnp.asarray([-2.6, 0.0], dtype=jnp.float32)
+            dist_now = jnp.linalg.norm(pos - goal, axis=-1)
+            next_pos = pos + self.cfg.dt * self.cfg.u_max * exec_clean
+            dist_next = jnp.linalg.norm(next_pos - goal, axis=-1)
+            progress_score = 10.0 * (dist_now - dist_next) - 0.3 * dist_next
+
+            lambda_eff = self.lambda_p * jnp.clip((state.step - 1000) / 20000.0, 0.0, 1.0)
+
+            score = jax.lax.stop_gradient(
+                q_reward + progress_score - lambda_eff * q_proj
+            )
+
+            critic = score / jnp.maximum(alpha, 1e-3)
+            w = jnp.exp(critic - jax.nn.logsumexp(critic, axis=1, keepdims=True))
+
+            obs_r = obs_rep.reshape(-1, obs.shape[-1])
             clean_r = clean.reshape(-1, raw_action.shape[-1])
-            noisy_r = noisy.reshape(-1, raw_action.shape[-1])
+            noisy_r = noisy_rep.reshape(-1, raw_action.shape[-1])
             t_r = t.reshape(-1)
             w_r = w.reshape(-1, 1)
-            u_r = u.reshape(-1, raw_action.shape[-1])
+            u_r = clean_r - noisy_r
+
+            weight_entropy = -jnp.mean(jnp.sum(w * jnp.log(w + 1e-8), axis=1))
+            top_weight_mean = jnp.mean(jnp.max(w, axis=1))
+            far_batch = jnp.mean((projection_residual_candidates > 1e-8).astype(jnp.float32))
+            apr_batch = jnp.mean(projection_residual_candidates ** 2)
 
             tn_energy = tn_normal_energy = tn_tangent_energy = tn_gate_mean = tn_residual_xt_mean = jnp.float32(0.0)
 
@@ -370,23 +395,19 @@ class SafePullbackRF2SACENT(Algorithm):
                         projection_cost_batch=jnp.mean(projection_cost),
                         safe_pullback_score_mean=jnp.mean(score),
                         qp_td_loss=qp_aux["td_loss"], qp_cf_loss=qp_aux["l_cf"], qp_lb_loss=qp_aux["lb"],
-                        lambda_p_current=lambda_p_current, FAR_batch=far_batch, APR_batch=apr_batch,
+                        lambda_eff=lambda_eff, FAR_batch=far_batch, APR_batch=apr_batch,
                         candidate_q_reward_mean=jnp.mean(q_reward),
                         candidate_q_projection_mean=jnp.mean(q_proj),
-                        candidate_q_projection_nonneg_mean=jnp.mean(q_proj_for_score),
-                        candidate_projection_residual_mean=jnp.mean(residual_clean),
-                        frpi_score_mean=jnp.mean(frpi_score),
-                        compatibility_mean=jnp.mean(compatibility),
-                        compatibility_min=jnp.min(compatibility),
-                        compatibility_max=jnp.max(compatibility),
+                        projection_residual_candidate_mean=jnp.mean(projection_residual_candidates),
+                        projection_residual_candidate_max=jnp.max(projection_residual_candidates),
+                        progress_score_mean=jnp.mean(progress_score),
+                        progress_score_max=jnp.max(progress_score),
+                        weight_entropy=weight_entropy,
+                        top_weight_mean=top_weight_mean,
                         tn_energy=tn_energy, tn_normal_energy=tn_normal_energy,
                         tn_tangent_energy=tn_tangent_energy, tn_gate_mean=tn_gate_mean,
                         tn_residual_xt_mean=tn_residual_xt_mean,
                         flow_loss=p_aux[0], candidate_temp=jnp.float32(self.candidate_temp),
-                        candidate_weight_entropy=jnp.mean(h_w),
-                        candidate_weight_entropy_norm=jnp.mean(h_w_norm),
-                        candidate_weight_ess=jnp.mean(ess),
-                        candidate_weight_max=jnp.mean(w_max),
                         entropy_reg_mode_id=jnp.float32(
                             0.0 if self.entropy_reg_mode == "legacy"
                             else 1.0 if self.entropy_reg_mode == "likelihood_tn"
