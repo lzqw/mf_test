@@ -242,7 +242,7 @@ def main():
                 if args.save_eval_plots or args.save_eval_rollouts:
                     eval_agent = None if args.algo == 'goal_filter' else agent
                     rollout_data, eval_result = collect_eval_rollouts(
-                        eval_agent, args.algo, args.eval_episodes, seed=args.seed + step
+                        eval_agent, args.algo, args.eval_episodes, seed=args.seed + step, start_y_range=args.start_y_range
                     )
                     step_eval_dir = log_dir / "eval_rollouts" / f"step_{step:08d}"
                     step_eval_dir.mkdir(parents=True, exist_ok=True)
@@ -266,9 +266,9 @@ def main():
                         )
                 else:
                     if args.algo == 'goal_filter':
-                        eval_result = run_evaluation(None, args.algo, args.eval_episodes, seed=args.seed + step)
+                        eval_result = run_evaluation(None, args.algo, args.eval_episodes, seed=args.seed + step, start_y_range=args.start_y_range)
                     else:
-                        eval_result = run_evaluation(agent, args.algo, args.eval_episodes, seed=args.seed + step)
+                        eval_result = run_evaluation(agent, args.algo, args.eval_episodes, seed=args.seed + step, start_y_range=args.start_y_range)
                 eval_result['step'] = step
                 eval_log.append(eval_result)
                 for k, v in eval_result.items():

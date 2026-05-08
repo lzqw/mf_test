@@ -33,6 +33,7 @@ def make_algo(args, obs_dim=8, act_dim=2):
         key, obs_dim, act_dim, hidden_sizes=[256, 256, 256], diffusion_hidden_sizes=[256, 256, 256],
         num_timesteps=args.diffusion_steps, num_ent_timesteps=args.num_ent_timesteps,
         alpha_value=args.alpha_value, fixed_alpha=args.fixed_alpha, init_alpha=args.init_alpha,
+        noise_scale=getattr(args, "policy_noise_scale", 0.3),
     )
     return SafePullbackRF2SACENT(
         net, params, gamma=args.gamma, gamma_p=args.gamma_p, lr=args.lr, alpha_lr=args.alpha_lr,
@@ -42,6 +43,16 @@ def make_algo(args, obs_dim=8, act_dim=2):
         use_frpi_score=args.use_frpi_score, tau_c=args.tau_c, mu_c=args.mu_c, lambda_f=args.lambda_f,
         use_tn_energy=args.use_tn_energy, tn_coef=args.tn_coef, sigma_n=args.sigma_n, sigma_t=args.sigma_t,
         tn_r_min=args.tn_r_min, tn_r_max=args.tn_r_max, tn_clip=args.tn_clip, kappa_tn=args.kappa_tn,
+        entropy_reg_mode=getattr(args, "entropy_reg_mode", "legacy"),
+        candidate_temp=getattr(args, "candidate_temp", 0.10),
+        beta_normal_entropy=getattr(args, "beta_normal_entropy", 1.0),
+        min_effective_entropy=getattr(args, "min_effective_entropy", -20.0),
+        target_effective_entropy=getattr(args, "target_effective_entropy", 1.0),
+        normal_energy_coef=getattr(args, "normal_energy_coef", 0.05),
+        target_safe_energy=getattr(args, "target_safe_energy", 0.05),
+        safe_iso_coef=getattr(args, "safe_iso_coef", 0.05),
+        safe_energy_variant=getattr(args, "safe_energy_variant", "normal_iso"),
+        weight_mix=getattr(args, "weight_mix", 0.05),
     )
 
 
@@ -64,8 +75,13 @@ def load_agent(checkpoint_path, algo):
             'use_frpi_score': False, 'tau_c': 1.0, 'mu_c': 1.0, 'lambda_f': 2.0,
             'use_tn_energy': False, 'tn_coef': 1.0, 'sigma_n': 0.2, 'sigma_t': 1.0,
             'tn_r_min': 0.02, 'tn_r_max': 0.20, 'tn_clip': 10.0, 'kappa_tn': 1.0,
+            'policy_noise_scale': 0.3, 'start_y_range': 0.4, 'weight_mix': 0.05,
+            'entropy_reg_mode': 'legacy', 'candidate_temp': 0.10, 'beta_normal_entropy': 1.0,
+            'min_effective_entropy': -20.0, 'target_effective_entropy': 1.0,
+            'normal_energy_coef': 0.05, 'target_safe_energy': 0.05, 'safe_iso_coef': 0.05,
+            'safe_energy_variant': 'normal_iso',
         }
-    defaults = {'use_frpi_score': False, 'tau_c': 1.0, 'mu_c': 1.0, 'lambda_f': 2.0, 'use_tn_energy': False, 'tn_coef': 1.0, 'sigma_n': 0.2, 'sigma_t': 1.0, 'tn_r_min': 0.02, 'tn_r_max': 0.20, 'tn_clip': 10.0, 'kappa_tn': 1.0}
+    defaults = {'use_frpi_score': False, 'tau_c': 1.0, 'mu_c': 1.0, 'lambda_f': 2.0, 'use_tn_energy': False, 'tn_coef': 1.0, 'sigma_n': 0.2, 'sigma_t': 1.0, 'tn_r_min': 0.02, 'tn_r_max': 0.20, 'tn_clip': 10.0, 'kappa_tn': 1.0, 'policy_noise_scale': 0.3, 'start_y_range': 0.4, 'weight_mix': 0.05, 'entropy_reg_mode': 'legacy', 'candidate_temp': 0.10, 'beta_normal_entropy': 1.0, 'min_effective_entropy': -20.0, 'target_effective_entropy': 1.0, 'normal_energy_coef': 0.05, 'target_safe_energy': 0.05, 'safe_iso_coef': 0.05, 'safe_energy_variant': 'normal_iso'}
     for k, v in defaults.items():
         saved_args.setdefault(k, v)
     args = argparse.Namespace(**saved_args)
@@ -146,8 +162,8 @@ def _compute_summary(positions, distance_to_obstacle, state_violation, safe_viol
     }
 
 
-def collect_eval_rollouts(agent, algo, eval_episodes=200, seed=0, effective_entropy_tau_res=0.1):
-    env = SafeObstacleNavigation2DEnv(use_filter=algo != 'rf2_no_filter', seed=seed, start_y_range=0.4)
+def collect_eval_rollouts(agent, algo, eval_episodes=200, seed=0, effective_entropy_tau_res=0.1, start_y_range=0.4):
+    env = SafeObstacleNavigation2DEnv(use_filter=algo != 'rf2_no_filter', seed=seed, start_y_range=start_y_range)
     key = jax.random.PRNGKey(seed + 123)
     t_max, n = env.episode_len, eval_episodes
 
@@ -355,9 +371,9 @@ def plot_eval_trajectories(save_dir, positions, is_success, time_to_goal, valid_
             plt.close(fig)
 
 
-def run_evaluation(agent, algo, eval_episodes=200, seed=0, effective_entropy_tau_res=0.1):
+def run_evaluation(agent, algo, eval_episodes=200, seed=0, effective_entropy_tau_res=0.1, start_y_range=0.4):
     _, summary = collect_eval_rollouts(agent, algo, eval_episodes=eval_episodes, seed=seed,
-                                       effective_entropy_tau_res=effective_entropy_tau_res)
+                                       effective_entropy_tau_res=effective_entropy_tau_res, start_y_range=start_y_range)
     return summary
 
 
@@ -368,6 +384,7 @@ def main():
     p.add_argument('--eval_episodes', type=int, default=200)
     p.add_argument('--save_dir', required=True)
     p.add_argument('--effective_entropy_tau_res', type=float, default=0.1)
+    p.add_argument('--start_y_range', type=float, default=0.4)
     p.add_argument('--save_plots', action='store_true', default=False)
     p.add_argument('--plot_max_episodes', type=int, default=100)
     p.add_argument('--plot_individual_episodes', action='store_true', default=False)
@@ -384,6 +401,7 @@ def main():
     rollout_data, summary = collect_eval_rollouts(
         agent, args.algo, eval_episodes=args.eval_episodes, seed=0,
         effective_entropy_tau_res=args.effective_entropy_tau_res,
+        start_y_range=args.start_y_range,
     )
 
     np.savez(save_dir / 'rollouts.npz', **rollout_data)
