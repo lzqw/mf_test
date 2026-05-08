@@ -219,10 +219,12 @@ def plot_eval_trajectories(save_dir, positions, is_success, time_to_goal, valid_
                            failure_only=False, individual=False, dpi=200, fmt="png", title=None):
     del projection_residual, filter_active
     env = SafeObstacleNavigation2DEnv(seed=0)
-    x_min, x_max, y_min, y_max = env.x_min, env.x_max, env.y_min, env.y_max
-    obs_center = env.obstacle_center
-    obs_radius = env.obstacle_radius
-    eps_obs = env.eps_obs
+    cfg = env.cfg
+    x_min, x_max = cfg.x_min, cfg.x_max
+    y_min, y_max = cfg.y_min, cfg.y_max
+    obs_center = np.asarray(cfg.obstacle_center)
+    obs_radius = cfg.obstacle_radius
+    eps_obs = cfg.eps_obs
     goal = np.asarray(env.goal)
 
     save_dir = Path(save_dir)
