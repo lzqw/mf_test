@@ -56,17 +56,49 @@ class SafePullbackRF2SACENTNet:
     def get_vp(self, vp_params, obs):
         return self.vp(vp_params, obs)
 
+
+    def directional_noise(self, key, obs, base_std, return_components=False):
+        goal_vec = -obs[..., 2:4]
+        normal_vec = obs[..., 4:6]
+        d_obs = obs[..., 6:7]
+
+        e_goal = goal_vec / (jnp.linalg.norm(goal_vec, axis=-1, keepdims=True) + 1e-6)
+        e_normal = normal_vec / (jnp.linalg.norm(normal_vec, axis=-1, keepdims=True) + 1e-6)
+        e_tangent = jnp.concatenate([-e_normal[..., 1:2], e_normal[..., 0:1]], axis=-1)
+
+        near_scale = 0.5
+        near = jnp.exp(-jnp.maximum(d_obs, 0.0) / near_scale)
+        sigma_goal = base_std * (1.0 - 0.5 * near)
+        sigma_tangent = base_std * (0.3 + 1.7 * near)
+        sigma_normal = base_std * (1.0 - 0.8 * near)
+
+        k1, k2, k3, k4 = jax.random.split(key, 4)
+        eta_g = jax.random.normal(k1, (*obs.shape[:-1], 1))
+        eta_t = jax.random.normal(k2, (*obs.shape[:-1], 1))
+        eta_n = jax.random.normal(k3, (*obs.shape[:-1], 1))
+        sign = jnp.where(jax.random.bernoulli(k4, 0.5, (*obs.shape[:-1], 1)), 1.0, -1.0)
+        eta_n_safe = jnp.maximum(eta_n, -0.2)
+
+        g_comp = sigma_goal * eta_g * e_goal
+        t_comp = sigma_tangent * eta_t * sign * e_tangent
+        n_comp = sigma_normal * eta_n_safe * e_normal
+        noise = g_comp + t_comp + n_comp
+        if return_components:
+            return noise, (g_comp, t_comp, n_comp, near)
+        return noise
+
     def get_action(self, key, policy_tuple, obs):
         policy_params, log_alpha, q1_params, q2_params = policy_tuple
 
         def model_fn(t, x):
             return self.policy(policy_params, obs, x, t)
 
-        act = self.flow.p_sample(key, model_fn, (*obs.shape[:-1], self.act_dim)).clip(-1, 1)
-        noise = jax.random.normal(jax.random.split(key)[1], act.shape)
+        sample_key, noise_key = jax.random.split(key)
+        act = self.flow.p_sample(sample_key, model_fn, (*obs.shape[:-1], self.act_dim)).clip(-1, 1)
         scale = jnp.float32(self.alpha_value) if self.fixed_alpha else jnp.exp(log_alpha)
-        noisy_act = act + noise * scale * self.noise_scale
-        return jnp.clip(noisy_act, -1.0, 1.0)
+        base_std = scale * self.noise_scale
+        noise = self.directional_noise(noise_key, obs, base_std)
+        return jnp.clip(act + noise, -1.0, 1.0)
 
     def get_action_ent(self, key, policy_tuple, obs):
         policy_params, log_alpha, q1_params, q2_params = policy_tuple
@@ -78,9 +110,10 @@ class SafePullbackRF2SACENTNet:
         act = self.flow.p_sample(sample_key, model_fn, (*obs.shape[:-1], self.act_dim)).clip(-1, 1)
         log_prob = self.compute_log_likelihood(ent_key, policy_params, obs, act)
         entropy = -log_prob
-        scale = jnp.float32(0.1) if self.fixed_alpha else jnp.exp(log_alpha)
-        noisy_act = act + jax.random.normal(noise_key, act.shape) * scale * self.noise_scale
-        return jnp.clip(noisy_act, -1.0, 1.0), entropy
+        scale = jnp.float32(self.alpha_value) if self.fixed_alpha else jnp.exp(log_alpha)
+        base_std = scale * self.noise_scale
+        noise = self.directional_noise(noise_key, obs, base_std)
+        return jnp.clip(act + noise, -1.0, 1.0), entropy
 
     def compute_log_likelihood(self, key, policy_params, obs, act):
         def model_fn(t, x):

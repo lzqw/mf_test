@@ -36,7 +36,7 @@ class SafePullbackRF2SACENT(Algorithm):
                  entropy_reg_mode="legacy", candidate_temp=0.10,
                  beta_normal_entropy=1.0, min_effective_entropy=-20.0, target_effective_entropy=1.0,
                  normal_energy_coef=0.05, target_safe_energy=0.05,
-                 safe_iso_coef=0.05, safe_energy_variant="normal_iso"):
+                 safe_iso_coef=0.05, safe_energy_variant="normal_iso", weight_mix=0.05):
         self.agent = agent
         self.gamma = gamma
         self.gamma_p = gamma_p
@@ -70,6 +70,7 @@ class SafePullbackRF2SACENT(Algorithm):
         self.target_safe_energy = target_safe_energy
         self.safe_iso_coef = safe_iso_coef
         self.safe_energy_variant = safe_energy_variant
+        self.weight_mix = weight_mix
         self.optim = optax.adam(lr)
         self.policy_optim = optax.adam(lr)
         self.alpha_optim = optax.adam(alpha_lr)
@@ -180,7 +181,7 @@ class SafePullbackRF2SACENT(Algorithm):
                 effective_entropy = jnp.maximum(entropy_total - self.beta_normal_entropy * jax.lax.stop_gradient(normal_entropy_penalty), self.min_effective_entropy)
                 q_backup = reward * self.reward_scale + (1.0 - done) * self.gamma * (min_q_t + alpha * effective_entropy)
             else:
-                q_backup = reward * self.reward_scale + (1.0 - done) * self.gamma * (min_q_t - alpha * jax.lax.stop_gradient(safe_energy_next))
+                q_backup = reward * self.reward_scale + (1.0 - done) * self.gamma * (min_q_t + alpha * jax.lax.stop_gradient(safe_energy_next))
 
             def qloss(qp, target):
                 pred = self.agent.q(qp, obs, exec_action)
@@ -240,47 +241,47 @@ class SafePullbackRF2SACENT(Algorithm):
             # -------- Candidate actions for Q-weighted flow update --------
             batch_size = obs.shape[0]
             act_dim = raw_action.shape[-1]
+            k_t, k_local, k_rand = jax.random.split(k2, 3)
+            K = self.K
+            min_k = 8
+            k_eff = jnp.maximum(K, min_k)
 
-            k_t, k_noise, k_rand = jax.random.split(k2, 3)
+            goal_vec = -obs[..., 2:4]
+            rel_obs = obs[..., 4:6]
+            d_obs = obs[..., 6:7]
+            e_goal = goal_vec / (jnp.linalg.norm(goal_vec, axis=-1, keepdims=True) + 1e-6)
+            e_normal = rel_obs / (jnp.linalg.norm(rel_obs, axis=-1, keepdims=True) + 1e-6)
+            e_tangent = jnp.concatenate([-e_normal[..., 1:2], e_normal[..., 0:1]], axis=-1)
 
-            t = jax.random.uniform(
-                k_t,
-                (batch_size, self.K, 1),
-                minval=1e-3,
-                maxval=0.994,
-            )
+            step_goal, step_tangent = 0.4, 0.6
+            a_goal = jnp.clip(raw_action + step_goal * e_goal, -1.0, 1.0)
+            a_tan_pos = jnp.clip(raw_action + step_tangent * e_tangent, -1.0, 1.0)
+            a_tan_neg = jnp.clip(raw_action - step_tangent * e_tangent, -1.0, 1.0)
 
-            random_clean = jax.random.uniform(
-                k_rand,
-                (batch_size, self.K - 1, act_dim),
-                minval=-1.0,
-                maxval=1.0,
-            )
+            n_local = int(max(self.K // 2, 1))
+            n_fixed = 4
+            n_uniform = int(max(self.K - n_fixed - n_local, 0))
+            n_local = int(self.K - n_fixed - n_uniform)
 
-            clean = jnp.concatenate(
-                [raw_action[:, None, :], random_clean],
-                axis=1,
-            )
+            local_obs = jnp.repeat(obs[:, None, :], n_local, axis=1)
+            local_raw = jnp.repeat(raw_action[:, None, :], n_local, axis=1)
+            scale = alpha * self.agent.noise_scale
+            local_noise = self.agent.directional_noise(k_local, local_obs, scale)
+            local_clean = jnp.clip(local_raw + local_noise, -1.0, 1.0)
 
-            noise = jax.random.normal(k_noise, clean.shape)
+            uniform_clean = jax.random.uniform(k_rand, (batch_size, n_uniform, act_dim), minval=-1.0, maxval=1.0)
+            clean = jnp.concatenate([raw_action[:, None, :], a_goal[:, None, :], a_tan_pos[:, None, :], a_tan_neg[:, None, :], local_clean, uniform_clean], axis=1)
+            clean = clean[:, :self.K, :]
+
+            t = jax.random.uniform(k_t, (batch_size, self.K, 1), minval=1e-3, maxval=0.994)
+            noise = jax.random.normal(k_local, clean.shape)
             noisy_rep = t * clean + (1.0 - t) * noise
-
             obs_rep = jnp.repeat(obs[:, None, :], self.K, axis=1)
 
-            exec_clean, _, projection_residual_candidates = project_action_jax_batched(
-                obs_rep, clean, self.action_grid, self.cfg
-            )
+            exec_clean, _, projection_residual_candidates = project_action_jax_batched(obs_rep, clean, self.action_grid, self.cfg)
 
-            q_reward = jnp.minimum(
-                self.agent.q(p.q1, obs_rep, exec_clean),
-                self.agent.q(p.q2, obs_rep, exec_clean),
-            )
-
-            q_proj = (
-                self.agent.get_qp(p.qp, obs_rep, clean)
-                if self.use_projection_critic
-                else jnp.zeros_like(q_reward)
-            )
+            q_reward = jnp.minimum(self.agent.q(p.q1, obs_rep, exec_clean), self.agent.q(p.q2, obs_rep, exec_clean))
+            q_proj = self.agent.get_qp(p.qp, obs_rep, clean) if self.use_projection_critic else jnp.zeros_like(q_reward)
 
             pos = obs_rep[..., 0:2]
             goal = jnp.asarray([-2.6, 0.0], dtype=jnp.float32)
@@ -288,15 +289,13 @@ class SafePullbackRF2SACENT(Algorithm):
             next_pos = pos + self.cfg.dt * self.cfg.u_max * exec_clean
             dist_next = jnp.linalg.norm(next_pos - goal, axis=-1)
             progress_score = 10.0 * (dist_now - dist_next) - 0.3 * dist_next
-
             lambda_eff = self.lambda_p * jnp.clip((state.step - 1000) / 20000.0, 0.0, 1.0)
-
-            score = jax.lax.stop_gradient(
-                q_reward + progress_score - lambda_eff * q_proj
-            )
+            score = jax.lax.stop_gradient(q_reward + progress_score - lambda_eff * q_proj)
 
             critic = score / jnp.maximum(alpha, 1e-3)
-            w = jnp.exp(critic - jax.nn.logsumexp(critic, axis=1, keepdims=True))
+            w_soft = jnp.exp(critic - jax.nn.logsumexp(critic, axis=1, keepdims=True))
+            uniform_w = jnp.ones_like(w_soft) / self.K
+            w = (1.0 - self.weight_mix) * w_soft + self.weight_mix * uniform_w
 
             obs_r = obs_rep.reshape(-1, obs.shape[-1])
             clean_r = clean.reshape(-1, raw_action.shape[-1])
@@ -404,6 +403,11 @@ class SafePullbackRF2SACENT(Algorithm):
                         progress_score_max=jnp.max(progress_score),
                         weight_entropy=weight_entropy,
                         top_weight_mean=top_weight_mean,
+                        clean_candidate_std=jnp.mean(jnp.std(clean, axis=1)),
+                        raw_action_batch_std=jnp.mean(jnp.std(raw_action, axis=0)),
+                        tangent_candidate_fraction=jnp.float32((2.0 + n_local) / self.K),
+                        uniform_candidate_fraction=jnp.float32(n_uniform / self.K),
+                        goal_candidate_fraction=jnp.float32(1.0 / self.K),
                         tn_energy=tn_energy, tn_normal_energy=tn_normal_energy,
                         tn_tangent_energy=tn_tangent_energy, tn_gate_mean=tn_gate_mean,
                         tn_residual_xt_mean=tn_residual_xt_mean,
