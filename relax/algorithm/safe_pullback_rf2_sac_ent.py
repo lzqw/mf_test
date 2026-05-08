@@ -181,7 +181,7 @@ class SafePullbackRF2SACENT(Algorithm):
                 effective_entropy = jnp.maximum(entropy_total - self.beta_normal_entropy * jax.lax.stop_gradient(normal_entropy_penalty), self.min_effective_entropy)
                 q_backup = reward * self.reward_scale + (1.0 - done) * self.gamma * (min_q_t + alpha * effective_entropy)
             else:
-                q_backup = reward * self.reward_scale + (1.0 - done) * self.gamma * (min_q_t + alpha * jax.lax.stop_gradient(safe_energy_next))
+                q_backup = reward * self.reward_scale + (1.0 - done) * self.gamma * (min_q_t - alpha * jax.lax.stop_gradient(safe_energy_next))
 
             def qloss(qp, target):
                 pred = self.agent.q(qp, obs, exec_action)
@@ -241,7 +241,7 @@ class SafePullbackRF2SACENT(Algorithm):
             # -------- Candidate actions for Q-weighted flow update --------
             batch_size = obs.shape[0]
             act_dim = raw_action.shape[-1]
-            k_t, k_local, k_rand = jax.random.split(k2, 3)
+            k_t, k_local, k_rand, k_flow_noise = jax.random.split(k2, 4)
             K = self.K
             min_k = 8
             k_eff = jnp.maximum(K, min_k)
@@ -274,7 +274,7 @@ class SafePullbackRF2SACENT(Algorithm):
             clean = clean[:, :self.K, :]
 
             t = jax.random.uniform(k_t, (batch_size, self.K, 1), minval=1e-3, maxval=0.994)
-            noise = jax.random.normal(k_local, clean.shape)
+            noise = jax.random.normal(k_flow_noise, clean.shape)
             noisy_rep = t * clean + (1.0 - t) * noise
             obs_rep = jnp.repeat(obs[:, None, :], self.K, axis=1)
 
@@ -289,10 +289,12 @@ class SafePullbackRF2SACENT(Algorithm):
             next_pos = pos + self.cfg.dt * self.cfg.u_max * exec_clean
             dist_next = jnp.linalg.norm(next_pos - goal, axis=-1)
             progress_score = 10.0 * (dist_now - dist_next) - 0.3 * dist_next
-            lambda_eff = self.lambda_p * jnp.clip((state.step - 1000) / 20000.0, 0.0, 1.0)
+            warmup_steps = jnp.maximum(jnp.float32(self.lambda_p_warmup_steps), 1.0)
+            lambda_eff = self.lambda_p * jnp.clip(jnp.float32(state.step) / warmup_steps, 0.0, 1.0)
             score = jax.lax.stop_gradient(q_reward + progress_score - lambda_eff * q_proj)
 
-            critic = score / jnp.maximum(alpha, 1e-3)
+            candidate_temp = jnp.maximum(jnp.float32(self.candidate_temp), 1e-3)
+            critic = score / candidate_temp
             w_soft = jnp.exp(critic - jax.nn.logsumexp(critic, axis=1, keepdims=True))
             uniform_w = jnp.ones_like(w_soft) / self.K
             w = (1.0 - self.weight_mix) * w_soft + self.weight_mix * uniform_w
