@@ -15,7 +15,7 @@ from relax.safety.obstacle_navigation_filter import (
 class SafeObstacleNavigation2DEnv(gym.Env):
     metadata = {"render_modes": []}
 
-    def __init__(self, noise_sigma=(0.01, 0.01), use_filter=True, seed=0):
+    def __init__(self, noise_sigma=(0.01, 0.01), use_filter=True, seed=0, start_y_range=0.4):
         self.cfg = ObstacleNavConfig()
         self.use_filter = use_filter
         self.u_max = 1.0
@@ -27,6 +27,7 @@ class SafeObstacleNavigation2DEnv(gym.Env):
         self.obstacle_radius = 0.8
         self.noise_sigma = np.asarray(noise_sigma, dtype=np.float32)
         self.rng = np.random.default_rng(seed)
+        self.start_y_range = float(start_y_range)
         self.action_space = Box(low=-1.0, high=1.0, shape=(2,), dtype=np.float32)
         self.observation_space = Box(low=-np.inf, high=np.inf, shape=(8,), dtype=np.float32)
         self.action_grid_norm = make_action_grid(61)
@@ -71,7 +72,7 @@ class SafeObstacleNavigation2DEnv(gym.Env):
     def reset(self, seed=None, options=None):
         if seed is not None:
             self.rng = np.random.default_rng(seed)
-        self.state = np.array([2.6, self.rng.uniform(-0.15, 0.15)], dtype=np.float32)
+        self.state = np.array([2.6, self.rng.uniform(-self.start_y_range, self.start_y_range)], dtype=np.float32)
         self.prev_exec_action = np.zeros(2, dtype=np.float32)
         self.t = 0
         obs = self._get_obs_from_state(self.state)

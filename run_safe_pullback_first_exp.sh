@@ -34,3 +34,30 @@ python plot/plot_obstacle_rollouts.py \
   --methods safe_pullback_rf2_fix \
   --base_dir results/obstacle \
   --out_dir figures
+
+
+python scripts/train_safe_obstacle_navigation.py \
+  --algo safe_pullback_rf2 \
+  --seed 0 \
+  --total_steps 200000 \
+  --start_steps 20000 \
+  --update_after 10000 \
+  --batch_size 256 \
+  --sample_k 256 \
+  --lambda_p 0.1 \
+  --init_alpha 0.1 \
+  --policy_noise_scale 0.3 \
+  --start_y_range 0.4 \
+  --weight_mix 0.05 \
+  --log_dir logs/obstacle/safe_pullback_rf2_seed0_sym_tangent_fix
+
+python eval/eval_safe_obstacle_navigation.py \
+  --checkpoint logs/obstacle/safe_pullback_rf2_seed0_sym_tangent_fix/checkpoint.pkl \
+  --algo safe_pullback_rf2 \
+  --eval_episodes 200 \
+  --save_dir results/obstacle/safe_pullback_rf2_sym_tangent_fix
+
+python plot/plot_obstacle_rollouts.py \
+  --methods safe_pullback_rf2_sym_tangent_fix \
+  --base_dir results/obstacle \
+  --out_dir figures

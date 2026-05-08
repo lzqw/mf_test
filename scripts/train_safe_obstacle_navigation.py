@@ -60,6 +60,7 @@ def make_algo(args, obs_dim=8, act_dim=2):
         key, obs_dim, act_dim, hidden_sizes=[256, 256, 256], diffusion_hidden_sizes=[256, 256, 256],
         num_timesteps=args.diffusion_steps, num_ent_timesteps=args.num_ent_timesteps,
         alpha_value=args.alpha_value, fixed_alpha=args.fixed_alpha, init_alpha=args.init_alpha,
+        noise_scale=args.policy_noise_scale,
     )
     return SafePullbackRF2SACENT(
         net, params, gamma=args.gamma, gamma_p=args.gamma_p, lr=args.lr, alpha_lr=args.alpha_lr,
@@ -73,7 +74,7 @@ def make_algo(args, obs_dim=8, act_dim=2):
         beta_normal_entropy=args.beta_normal_entropy, min_effective_entropy=args.min_effective_entropy,
         target_effective_entropy=args.target_effective_entropy, normal_energy_coef=args.normal_energy_coef,
         target_safe_energy=args.target_safe_energy, safe_iso_coef=args.safe_iso_coef,
-        safe_energy_variant=args.safe_energy_variant,
+        safe_energy_variant=args.safe_energy_variant, weight_mix=args.weight_mix,
     )
 
 
@@ -122,12 +123,15 @@ def main():
     p.add_argument('--algo', default='safe_pullback_rf2')
     p.add_argument('--seed', type=int, default=0)
     p.add_argument('--total_steps', type=int, default=200000)
-    p.add_argument('--start_steps', type=int, default=10000)
+    p.add_argument('--start_steps', type=int, default=20000)
     p.add_argument('--update_after', type=int, default=10000)
     p.add_argument('--batch_size', type=int, default=256)
     p.add_argument('--eval_interval', type=int, default=5000)
     p.add_argument('--noise_sigma_x', type=float, default=0.01)
     p.add_argument('--noise_sigma_y', type=float, default=0.01)
+    p.add_argument('--start_y_range', type=float, default=0.4)
+    p.add_argument('--policy_noise_scale', type=float, default=0.3)
+    p.add_argument('--weight_mix', type=float, default=0.05)
     p.add_argument('--log_dir', required=True)
     p.add_argument('--lr', type=float, default=3e-4)
     p.add_argument('--alpha_lr', type=float, default=1e-2)
@@ -137,8 +141,8 @@ def main():
     p.add_argument('--lambda_p', type=float, default=0.1)
     p.add_argument('--use_projection_critic', action='store_true', default=False)
     p.add_argument('--fixed_alpha', action='store_true', default=False)
-    p.add_argument('--alpha_value', type=float, default=0.01)
-    p.add_argument('--init_alpha', type=float, default=0.01)
+    p.add_argument('--alpha_value', type=float, default=0.1)
+    p.add_argument('--init_alpha', type=float, default=0.1)
     p.add_argument('--diffusion_steps', type=int, default=10)
     p.add_argument('--num_ent_timesteps', type=int, default=10)
     p.add_argument('--lambda_p_warmup_steps', type=int, default=100000)
@@ -175,7 +179,7 @@ def main():
     configure_algo_mode(args)
 
     np.random.seed(args.seed)
-    env = SafeObstacleNavigation2DEnv(noise_sigma=(args.noise_sigma_x, args.noise_sigma_y), use_filter=args.use_filter, seed=args.seed)
+    env = SafeObstacleNavigation2DEnv(noise_sigma=(args.noise_sigma_x, args.noise_sigma_y), use_filter=args.use_filter, seed=args.seed, start_y_range=args.start_y_range)
     agent = make_algo(args)
     key = jax.random.PRNGKey(args.seed + 7)
 

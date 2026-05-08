@@ -75,7 +75,7 @@ def load_agent(checkpoint_path, algo):
 
 
 def _compute_summary(positions, distance_to_obstacle, state_violation, safe_violation, filter_active,
-                     projection_residual, is_success, time_to_goal, valid_lengths, episode_return,
+                     projection_residual, raw_actions, exec_actions, distance_to_goal, is_success, time_to_goal, valid_lengths, episode_return,
                      effective_entropy_tau_res=0.1):
     n, t_max = distance_to_obstacle.shape
     routes = [classify_route(positions[i, :time_to_goal[i] + 1]) for i in range(n) if is_success[i]]
@@ -98,13 +98,20 @@ def _compute_summary(positions, distance_to_obstacle, state_violation, safe_viol
     else:
         p_up_eff, p_low_eff = 0.0, 0.0
     effective_route_entropy = -(p_up_eff * np.log(p_up_eff + 1e-8) + p_low_eff * np.log(p_low_eff + 1e-8))
+    all_routes = [classify_route(positions[i, :max(valid_lengths[i],2)]) for i in range(n)]
+    upper_all = all_routes.count('upper')
+    lower_all = all_routes.count('lower')
+    p_up_all = upper_all / max(n,1)
+    p_low_all = lower_all / max(n,1)
+    route_entropy_all = -(p_up_all * np.log(p_up_all + 1e-8) + p_low_all * np.log(p_low_all + 1e-8))
 
     final_distance_to_goal = np.zeros((n,), dtype=np.float32)
     min_distance_to_goal = np.zeros((n,), dtype=np.float32)
     for i in range(n):
-        last_step = max(int(valid_lengths[i]) - 2, 0)
-        final_distance_to_goal[i] = distance_to_goal[i, last_step]
-        min_distance_to_goal[i] = np.min(distance_to_goal[i, :last_step + 1])
+        step_count = max(int(valid_lengths[i]) - 1, 1)
+        valid_dist = distance_to_goal[i, :step_count]
+        final_distance_to_goal[i] = valid_dist[-1]
+        min_distance_to_goal[i] = np.min(valid_dist)
 
     return {
         'success_rate': float(np.mean(is_success)),
@@ -129,11 +136,18 @@ def _compute_summary(positions, distance_to_obstacle, state_violation, safe_viol
         'final_distance_to_goal_std': float(np.std(final_distance_to_goal)),
         'min_distance_to_goal_mean': float(np.mean(min_distance_to_goal)),
         'min_distance_to_goal_std': float(np.std(min_distance_to_goal)),
+        'raw_action_std': float(np.mean([np.std(raw_actions[i, :max(valid_lengths[i]-1,1)], axis=0).mean() for i in range(n)])),
+        'exec_action_std': float(np.mean([np.std(exec_actions[i, :max(valid_lengths[i]-1,1)], axis=0).mean() for i in range(n)])),
+        'projection_residual_mean_nonzero': float(np.mean(projection_residual[projection_residual > 1e-8])) if np.any(projection_residual > 1e-8) else 0.0,
+        'filter_activation_episode_rate': float(np.mean([np.any(filter_active[i, :max(valid_lengths[i]-1,1)]) for i in range(n)])),
+        'route_entropy_all_episodes': float(route_entropy_all),
+        'route_upper_ratio_all_episodes': float(p_up_all),
+        'route_lower_ratio_all_episodes': float(p_low_all),
     }
 
 
 def collect_eval_rollouts(agent, algo, eval_episodes=200, seed=0, effective_entropy_tau_res=0.1):
-    env = SafeObstacleNavigation2DEnv(use_filter=algo != 'rf2_no_filter', seed=seed)
+    env = SafeObstacleNavigation2DEnv(use_filter=algo != 'rf2_no_filter', seed=seed, start_y_range=0.4)
     key = jax.random.PRNGKey(seed + 123)
     t_max, n = env.episode_len, eval_episodes
 
@@ -216,6 +230,9 @@ def collect_eval_rollouts(agent, algo, eval_episodes=200, seed=0, effective_entr
         safe_violation=safe_violation,
         filter_active=filter_active,
         projection_residual=projection_residual,
+        raw_actions=raw_actions,
+        exec_actions=exec_actions,
+        distance_to_goal=distance_to_goal,
         is_success=is_success,
         time_to_goal=time_to_goal,
         valid_lengths=valid_lengths,
