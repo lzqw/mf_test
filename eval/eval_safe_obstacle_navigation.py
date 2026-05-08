@@ -99,6 +99,13 @@ def _compute_summary(positions, distance_to_obstacle, state_violation, safe_viol
         p_up_eff, p_low_eff = 0.0, 0.0
     effective_route_entropy = -(p_up_eff * np.log(p_up_eff + 1e-8) + p_low_eff * np.log(p_low_eff + 1e-8))
 
+    final_distance_to_goal = np.zeros((n,), dtype=np.float32)
+    min_distance_to_goal = np.zeros((n,), dtype=np.float32)
+    for i in range(n):
+        last_step = max(int(valid_lengths[i]) - 2, 0)
+        final_distance_to_goal[i] = distance_to_goal[i, last_step]
+        min_distance_to_goal[i] = np.min(distance_to_goal[i, :last_step + 1])
+
     return {
         'success_rate': float(np.mean(is_success)),
         'collision_rate': float(np.mean(np.any((distance_to_obstacle < 0.0) & step_mask, axis=1))),
@@ -118,6 +125,10 @@ def _compute_summary(positions, distance_to_obstacle, state_violation, safe_viol
         'return': float(np.mean(episode_return)),
         'FAR': float(np.sum(filter_active * step_mask) / valid_step_count),
         'APR': float(np.sum(projection_residual * step_mask) / valid_step_count),
+        'final_distance_to_goal_mean': float(np.mean(final_distance_to_goal)),
+        'final_distance_to_goal_std': float(np.std(final_distance_to_goal)),
+        'min_distance_to_goal_mean': float(np.mean(min_distance_to_goal)),
+        'min_distance_to_goal_std': float(np.std(min_distance_to_goal)),
     }
 
 

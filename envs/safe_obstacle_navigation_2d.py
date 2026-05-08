@@ -43,17 +43,29 @@ class SafeObstacleNavigation2DEnv(gym.Env):
         return np.array([pos[0], pos[1], rel_goal[0], rel_goal[1], rel_obs[0], rel_obs[1], d_obs, d_goal], dtype=np.float32)
 
     def _compute_reward(self, state, next_state, exec_action, prev_exec_action, success, state_violation):
-        w_goal, w_u, w_du = 1.0, 0.02, 0.01
-        goal_bonus, violation_penalty = 20.0, 50.0
-        reward = -(
-            w_goal * np.sum((state - self.goal) ** 2)
-            + w_u * np.sum(exec_action ** 2)
-            + w_du * np.sum((exec_action - prev_exec_action) ** 2)
-        )
+        dist_now = np.linalg.norm(state - self.goal)
+        dist_next = np.linalg.norm(next_state - self.goal)
+        progress = dist_now - dist_next
+
+        clearance = np.linalg.norm(next_state - self.obstacle_center) - self.obstacle_radius
+        action_cost = np.sum(exec_action ** 2)
+        delta_action_cost = np.sum((exec_action - prev_exec_action) ** 2)
+
+        reward = 0.0
+        reward += 8.0 * progress
+        reward -= 0.15 * dist_next
+        reward -= 0.02 * action_cost
+        reward -= 0.01 * delta_action_cost
+
+        if clearance < 0.15:
+            reward -= 2.0 * (0.15 - clearance)
+
         if success:
-            reward += goal_bonus
+            reward += 50.0
+
         if state_violation:
-            reward -= violation_penalty
+            reward -= 100.0
+
         return float(reward)
 
     def reset(self, seed=None, options=None):
