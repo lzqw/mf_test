@@ -35,7 +35,7 @@ from envs.safe_obstacle_navigation_2d import SafeObstacleNavigation2DEnv
 from relax.algorithm.safe_pullback_rf2_sac_ent import SafePullbackRF2SACENT
 from relax.network.safe_pullback_rf2_sac_ent import create_safe_pullback_rf2_sac_ent_net
 from scripts.safe_pullback_experience import SafePullbackExperience
-from eval.eval_safe_obstacle_navigation import run_evaluation
+from eval.eval_safe_obstacle_navigation import collect_eval_rollouts, plot_eval_trajectories, run_evaluation
 
 
 class Batch(NamedTuple):
@@ -165,6 +165,12 @@ def main():
     p.add_argument('--target_safe_energy', type=float, default=0.05)
     p.add_argument('--safe_iso_coef', type=float, default=0.05)
     p.add_argument('--safe_energy_variant', choices=['normal_iso', 'normal_tangent'], default='normal_iso')
+    p.add_argument('--save_eval_plots', action='store_true', default=False)
+    p.add_argument('--save_eval_rollouts', action='store_true', default=False)
+    p.add_argument('--eval_plot_max_episodes', type=int, default=50)
+    p.add_argument('--eval_plot_individual_episodes', action='store_true', default=False)
+    p.add_argument('--eval_plot_format', choices=['png', 'pdf', 'svg'], default='png')
+    p.add_argument('--eval_plot_dpi', type=int, default=200)
     args = p.parse_args()
     configure_algo_mode(args)
 
@@ -229,10 +235,36 @@ def main():
                 writer.flush()
 
             if step % args.eval_interval == 0:
-                if args.algo == 'goal_filter':
-                    eval_result = run_evaluation(None, args.algo, args.eval_episodes, seed=args.seed + step)
+                if args.save_eval_plots or args.save_eval_rollouts:
+                    eval_agent = None if args.algo == 'goal_filter' else agent
+                    rollout_data, eval_result = collect_eval_rollouts(
+                        eval_agent, args.algo, args.eval_episodes, seed=args.seed + step
+                    )
+                    step_eval_dir = log_dir / "eval_rollouts" / f"step_{step:08d}"
+                    step_eval_dir.mkdir(parents=True, exist_ok=True)
+                    (step_eval_dir / "summary.json").write_text(json.dumps(eval_result, indent=2))
+                    if args.save_eval_rollouts:
+                        np.savez(step_eval_dir / "rollouts.npz", **rollout_data)
+                    if args.save_eval_plots:
+                        plot_eval_trajectories(
+                            save_dir=step_eval_dir,
+                            positions=rollout_data["positions"],
+                            is_success=rollout_data["is_success"],
+                            time_to_goal=rollout_data["time_to_goal"],
+                            valid_lengths=rollout_data["valid_lengths"],
+                            projection_residual=rollout_data.get("projection_residual"),
+                            filter_active=rollout_data.get("filter_active"),
+                            max_episodes=args.eval_plot_max_episodes,
+                            individual=args.eval_plot_individual_episodes,
+                            dpi=args.eval_plot_dpi,
+                            fmt=args.eval_plot_format,
+                            title=f"{args.algo} trajectories at step {step}",
+                        )
                 else:
-                    eval_result = run_evaluation(agent, args.algo, args.eval_episodes, seed=args.seed + step)
+                    if args.algo == 'goal_filter':
+                        eval_result = run_evaluation(None, args.algo, args.eval_episodes, seed=args.seed + step)
+                    else:
+                        eval_result = run_evaluation(agent, args.algo, args.eval_episodes, seed=args.seed + step)
                 eval_result['step'] = step
                 eval_log.append(eval_result)
                 for k, v in eval_result.items():
