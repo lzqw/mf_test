@@ -39,7 +39,7 @@ def make_algo(args, obs_dim, act_dim):
 def eval_agent(agent,args):
     mets=[]
     for ep in range(args.eval_episodes):
-        env=SafeHumanoidBenchWrapper(args.env_name,use_filter=args.use_filter,filter_cfg=HumanoidSafeFilterConfig(residual_radius=args.residual_radius,smooth_radius=args.smooth_radius))
+        env=SafeHumanoidBenchWrapper(args.env_name,use_filter=args.use_filter,filter_cfg=HumanoidSafeFilterConfig(residual_radius=args.residual_radius,smooth_radius=args.smooth_radius),policy_path=args.policy_path,mean_path=args.mean_path,var_path=args.var_path,policy_type=args.policy_type)
         obs,_=env.reset(seed=args.seed+1000+ep); done=False; ret=0; steps=0; falls=[]; far=[]; apr=[]; info={}
         while not done and steps<1000:
             a=env.action_space.sample() if agent is None else np.asarray(agent.get_action(jax.random.PRNGKey(args.seed+ep+steps), obs[None])[0])
@@ -55,9 +55,10 @@ def main():
     p.add_argument('--fixed_alpha',action='store_true'); p.add_argument('--alpha_value',type=float,default=0.1); p.add_argument('--init_alpha',type=float,default=0.1)
     p.add_argument('--diffusion_steps',type=int,default=10); p.add_argument('--num_ent_timesteps',type=int,default=10); p.add_argument('--policy_noise_scale',type=float,default=0.3)
     p.add_argument('--entropy_reg_mode',choices=['legacy','likelihood_tn','flac_tn'],default='legacy'); p.add_argument('--use_tn_energy',action='store_true'); p.add_argument('--candidate_temp',type=float,default=0.1); p.add_argument('--beta_normal_entropy',type=float,default=1.0); p.add_argument('--min_effective_entropy',type=float,default=-20.0); p.add_argument('--target_effective_entropy',type=float,default=1.0); p.add_argument('--normal_energy_coef',type=float,default=0.05); p.add_argument('--weight_mix',type=float,default=0.05)
+    p.add_argument('--policy_path',type=str,default=None); p.add_argument('--mean_path',type=str,default=None); p.add_argument('--var_path',type=str,default=None); p.add_argument('--policy_type',type=str,default=None)
     args=p.parse_args(); np.random.seed(args.seed)
     log=Path(args.log_dir); log.mkdir(parents=True,exist_ok=True); writer=SummaryWriter(str(log/'tb')); (log/'args.json').write_text(json.dumps(vars(args),indent=2,sort_keys=True))
-    env=SafeHumanoidBenchWrapper(args.env_name,use_filter=args.use_filter,filter_cfg=HumanoidSafeFilterConfig(residual_radius=args.residual_radius,smooth_radius=args.smooth_radius)); obs,_=env.reset(seed=args.seed)
+    env=SafeHumanoidBenchWrapper(args.env_name,use_filter=args.use_filter,filter_cfg=HumanoidSafeFilterConfig(residual_radius=args.residual_radius,smooth_radius=args.smooth_radius),policy_path=args.policy_path,mean_path=args.mean_path,var_path=args.var_path,policy_type=args.policy_type); obs,_=env.reset(seed=args.seed)
     agent=make_algo(args, env.observation_space.shape[0], env.action_space.shape[0]); key=jax.random.PRNGKey(args.seed+7); buf=[]; train=[]; ev=[]
     for step in range(1,args.total_steps+1):
         if step<args.start_steps: raw=env.action_space.sample()
