@@ -8,8 +8,25 @@ from relax.safety.humanoidbench_filter import HumanoidSafeFilter, HumanoidSafeFi
 
 
 class SafeHumanoidBenchWrapper(gym.Wrapper):
-    def __init__(self, env_name: str = "h1hand-reach-v0", use_filter: bool = True, render_mode=None,
-                 filter_cfg: HumanoidSafeFilterConfig | None = None, **env_kwargs):
+    def __init__(
+        self,
+        env_name: str = "h1hand-reach-v0",
+        use_filter: bool = True,
+        render_mode=None,
+        filter_cfg: HumanoidSafeFilterConfig | None = None,
+        policy_path: str | None = None,
+        mean_path: str | None = None,
+        var_path: str | None = None,
+        policy_type: str | None = None,
+        **env_kwargs,
+    ):
+        if policy_type is not None:
+            env_kwargs.update(
+                policy_path=policy_path,
+                mean_path=mean_path,
+                var_path=var_path,
+                policy_type=policy_type,
+            )
         env = gym.make(env_name, render_mode=render_mode, **env_kwargs)
         super().__init__(env)
         self.use_filter = use_filter
