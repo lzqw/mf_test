@@ -44,7 +44,7 @@ def eval_agent(agent,args):
         while not done and steps<1000:
             a=env.action_space.sample() if agent is None else np.asarray(agent.get_action(jax.random.PRNGKey(args.seed+ep+steps), obs[None])[0])
             obs,r,term,trunc,info=env.step(a); done=term or trunc; ret+=r; steps+=1; falls.append(float(info.get('fall',0))); far.append(float(info.get('filter_active',0))); apr.append(float(info.get('projection_residual',0)))
-        mets.append(dict(return_=ret,episode_length=steps,FAR=np.mean(far),APR=np.mean(apr),fall_rate=np.max(falls) if falls else 0.0,success_rate=float(info['success']) if 'success' in info else float(info.get('reward_success',0.0)>0),hand_dist=float(info.get('hand_dist',np.nan)),target_dist=float(info.get('target_dist',np.nan))))
+        mets.append(dict(return_=ret,episode_length=steps,FAR=np.mean(far),APR=np.mean(apr),fall_rate=np.max(falls) if falls else 0.0,success_rate=float(info.get("is_success", 0.0)),hand_dist=float(info.get('hand_dist',np.nan)),target_dist=float(info.get('target_dist',np.nan))))
     keys=mets[0].keys(); return {k:float(np.nanmean([m[k] for m in mets])) for k in keys}
 
 def main():
@@ -59,6 +59,20 @@ def main():
     args=p.parse_args(); np.random.seed(args.seed)
     log=Path(args.log_dir); log.mkdir(parents=True,exist_ok=True); writer=SummaryWriter(str(log/'tb')); (log/'args.json').write_text(json.dumps(vars(args),indent=2,sort_keys=True))
     env=SafeHumanoidBenchWrapper(args.env_name,use_filter=args.use_filter,filter_cfg=HumanoidSafeFilterConfig(residual_radius=args.residual_radius,smooth_radius=args.smooth_radius),policy_path=args.policy_path,mean_path=args.mean_path,var_path=args.var_path,policy_type=args.policy_type); obs,_=env.reset(seed=args.seed)
+    print("=" * 80)
+    print("HumanoidBench Safe-Pullback Training")
+    print("env_name:", args.env_name)
+    print("policy_type:", args.policy_type)
+    print("policy_path:", args.policy_path)
+    print("observation_space:", env.observation_space)
+    print("action_space:", env.action_space)
+    print("obs_dim:", env.observation_space.shape[0])
+    print("act_dim:", env.action_space.shape[0])
+    print("use_filter:", args.use_filter)
+    print("residual_radius:", args.residual_radius)
+    print("smooth_radius:", args.smooth_radius)
+    print("entropy_reg_mode:", args.entropy_reg_mode)
+    print("=" * 80)
     agent=make_algo(args, env.observation_space.shape[0], env.action_space.shape[0]); key=jax.random.PRNGKey(args.seed+7); buf=[]; train=[]; ev=[]
     for step in range(1,args.total_steps+1):
         if step<args.start_steps: raw=env.action_space.sample()
