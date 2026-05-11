@@ -58,6 +58,13 @@ class SafePullbackRF2SACENTNet:
 
 
     def directional_noise(self, key, obs, base_std, return_components=False):
+        if self.act_dim != 2 or obs.shape[-1] < 8:
+            noise = base_std * jax.random.normal(key, (*obs.shape[:-1], self.act_dim))
+            if return_components:
+                zero = jnp.zeros_like(noise)
+                return noise, (zero, zero, zero, zero)
+            return noise
+
         goal_vec = -obs[..., 2:4]
         normal_vec = obs[..., 4:6]
         d_obs = obs[..., 6:7]

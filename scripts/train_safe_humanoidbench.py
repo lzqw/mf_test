@@ -43,8 +43,8 @@ def eval_agent(agent,args):
         obs,_=env.reset(seed=args.seed+1000+ep); done=False; ret=0; steps=0; falls=[]; far=[]; apr=[]; info={}
         while not done and steps<1000:
             a=env.action_space.sample() if agent is None else np.asarray(agent.get_action(jax.random.PRNGKey(args.seed+ep+steps), obs[None])[0])
-            obs,r,term,trunc,info=env.step(a); done=term or trunc; ret+=r; steps+=1; falls.append(float(info.get('fall',0))); far.append(float(info.get('filter_active',0))); apr.append(float(info.get('projection_cost',0)))
-        mets.append(dict(return_=ret,episode_length=steps,FAR=np.mean(far),APR=np.mean(apr),fall_rate=np.mean(falls),success_rate=float(info.get('success',info.get('reward_success',0.0))),hand_dist=float(info.get('hand_dist',np.nan)),target_dist=float(info.get('target_dist',np.nan))))
+            obs,r,term,trunc,info=env.step(a); done=term or trunc; ret+=r; steps+=1; falls.append(float(info.get('fall',0))); far.append(float(info.get('filter_active',0))); apr.append(float(info.get('projection_residual',0)))
+        mets.append(dict(return_=ret,episode_length=steps,FAR=np.mean(far),APR=np.mean(apr),fall_rate=np.max(falls) if falls else 0.0,success_rate=float(info['success']) if 'success' in info else float(info.get('reward_success',0.0)>0),hand_dist=float(info.get('hand_dist',np.nan)),target_dist=float(info.get('target_dist',np.nan))))
     keys=mets[0].keys(); return {k:float(np.nanmean([m[k] for m in mets])) for k in keys}
 
 def main():
