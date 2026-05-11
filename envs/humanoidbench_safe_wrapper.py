@@ -68,7 +68,7 @@ class SafeHumanoidBenchWrapper(gym.Wrapper):
     def step(self, raw_action):
         raw_action = np.asarray(raw_action, dtype=np.float32)
         if self.use_filter:
-            exec_action, filter_info = self.safe_filter.project(raw_action)
+            exec_action, filter_info = self._project_action(raw_action)
         else:
             exec_action = np.clip(raw_action, -1.0, 1.0)
             projection = exec_action - raw_action
@@ -92,3 +92,22 @@ class SafeHumanoidBenchWrapper(gym.Wrapper):
         info.setdefault("state_violation", info.get("fall", 0.0))
         info.setdefault("is_success", float(info.get("success", info.get("reward_success", 0.0))))
         return next_obs, reward, terminated, truncated, info
+
+    def _project_action(self, raw_action: np.ndarray):
+        if raw_action.shape[-1] != 3:
+            return self.safe_filter.project(raw_action)
+        try:
+            task = self.env.unwrapped.task
+            last_target = np.asarray(task.last_target, dtype=np.float32)
+            target_low = np.asarray(task.target_low, dtype=np.float32)
+            target_high = np.asarray(task.target_high, dtype=np.float32)
+            hand_pos = np.asarray(self.env.unwrapped.robot.left_hand_position(), dtype=np.float32)
+            return self.safe_filter.project_high_level_reach(
+                raw_action=raw_action,
+                last_target=last_target,
+                target_low=target_low,
+                target_high=target_high,
+                hand_pos=hand_pos,
+            )
+        except Exception:
+            return self.safe_filter.project(raw_action)
