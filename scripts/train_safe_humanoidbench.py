@@ -1,7 +1,8 @@
-import argparse, json, pickle, sys
+import argparse, json, pickle, sys, time
 from pathlib import Path
 from typing import NamedTuple
 import jax, jax.numpy as jnp, numpy as np
+from tqdm.auto import tqdm
 try:
     from tensorboardX import SummaryWriter
 except ImportError:
@@ -73,8 +74,27 @@ def main():
     print("smooth_radius:", args.smooth_radius)
     print("entropy_reg_mode:", args.entropy_reg_mode)
     print("=" * 80)
-    agent=make_algo(args, env.observation_space.shape[0], env.action_space.shape[0]); key=jax.random.PRNGKey(args.seed+7); buf=[]; train=[]; ev=[]
-    for step in range(1,args.total_steps+1):
+    agent = make_algo(args, env.observation_space.shape[0], env.action_space.shape[0])
+    key = jax.random.PRNGKey(args.seed + 7)
+    buf = []
+    train = []
+    ev = []
+    train_start_time = time.perf_counter()
+    last_eval_metrics = {
+        "return_": float("nan"),
+        "success_rate": float("nan"),
+        "FAR": float("nan"),
+        "APR": float("nan"),
+        "fall_rate": float("nan"),
+    }
+    pbar = tqdm(
+        range(1, args.total_steps + 1),
+        total=args.total_steps,
+        dynamic_ncols=True,
+        smoothing=0.05,
+        desc=f"{args.env_name} | {args.policy_type or 'flat'}",
+    )
+    for step in pbar:
         if step<args.start_steps: raw=env.action_space.sample()
         else: key,ak=jax.random.split(key); raw=np.asarray(agent.get_action(ak,obs[None])[0])
         nobs,reward,term,trunc,info=env.step(raw); exp=SafePullbackExperience.create(obs,raw,info['exec_action'],reward,term,trunc,nobs,info); buf.append(exp); buf=buf[-1_000_000:]; obs=nobs
@@ -85,9 +105,56 @@ def main():
             key,uk=jax.random.split(key); out=agent.update(uk,sample_batch(buf,args.batch_size)); out['step']=step; train.append(out)
             for k,v in out.items():
                 if k!='step': writer.add_scalar(f'train/{k}',float(v),step)
+        if step % 10 == 0 or step == 1:
+            elapsed = time.perf_counter() - train_start_time
+            steps_per_sec = step / max(elapsed, 1e-8)
+            pbar.set_postfix(
+                {
+                    "r": f"{float(reward):.2f}",
+                    "FAR": f"{float(info.get('filter_active', 0.0)):.2f}",
+                    "APR": f"{float(info.get('projection_residual', 0.0)):.3f}",
+                    "fall": f"{float(info.get('fall', 0.0)):.0f}",
+                    "eval_ret": f"{last_eval_metrics.get('return_', float('nan')):.1f}",
+                    "succ": f"{last_eval_metrics.get('success_rate', float('nan')):.2f}",
+                    "sps": f"{steps_per_sec:.1f}",
+                }
+            )
         if step%args.eval_interval==0:
-            e=eval_agent(agent,args); e['step']=step; ev.append(e); print(step,e)
+            eval_start = time.perf_counter()
+            e=eval_agent(agent,args)
+            eval_time = time.perf_counter() - eval_start
+            e['step']=step
+            e["eval_time_sec"] = float(eval_time)
+            ev.append(e)
+            last_eval_metrics.update(e)
+            elapsed = time.perf_counter() - train_start_time
+            avg_steps_per_sec = step / max(elapsed, 1e-8)
+            eta_sec = max(args.total_steps - step, 0) / max(avg_steps_per_sec, 1e-8)
+            pbar.write(
+                f"[eval step {step}/{args.total_steps}] "
+                f"return={e.get('return_', float('nan')):.3f}, "
+                f"success={e.get('success_rate', float('nan')):.3f}, "
+                f"FAR={e.get('FAR', float('nan')):.3f}, "
+                f"APR={e.get('APR', float('nan')):.3f}, "
+                f"fall={e.get('fall_rate', float('nan')):.3f}, "
+                f"eval_time={eval_time:.1f}s, "
+                f"avg_sps={avg_steps_per_sec:.2f}, "
+                f"eta={eta_sec / 60:.1f}min"
+            )
             for k,v in e.items():
                 if k!='step': writer.add_scalar(f'eval/{k}',float(v),step)
+            writer.add_scalar("time/eval_time_sec", float(eval_time), step)
+            writer.add_scalar("time/avg_steps_per_sec", float(avg_steps_per_sec), step)
+            writer.add_scalar("time/eta_sec", float(eta_sec), step)
+            writer.flush()
+    pbar.close()
+    total_elapsed = time.perf_counter() - train_start_time
+    print("=" * 80)
+    print("Training finished.")
+    print(f"Total elapsed time: {total_elapsed / 60:.2f} min")
+    print(f"Average speed: {args.total_steps / max(total_elapsed, 1e-8):.2f} step/s")
+    print("=" * 80)
+    writer.add_scalar("time/total_elapsed_sec", float(total_elapsed), args.total_steps)
+    writer.flush()
     pickle.dump(train,open(log/'train_metrics.pkl','wb')); pickle.dump(ev,open(log/'eval_metrics.pkl','wb')); pickle.dump(agent.state,open(log/'checkpoint.pkl','wb'))
 if __name__=='__main__': main()
