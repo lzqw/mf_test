@@ -37,6 +37,27 @@ def make_algo(args, obs_dim, act_dim):
         min_effective_entropy=args.min_effective_entropy, target_effective_entropy=args.target_effective_entropy,
         normal_energy_coef=args.normal_energy_coef, weight_mix=args.weight_mix, residual_radius=args.residual_radius, action_limit=1.0)
 
+def is_finite_number(x):
+    try:
+        return np.isfinite(float(x))
+    except Exception:
+        return False
+
+
+def safe_nanmean(values, default=None):
+    finite_values = []
+    for v in values:
+        try:
+            fv = float(v)
+            if np.isfinite(fv):
+                finite_values.append(fv)
+        except Exception:
+            pass
+    if len(finite_values) == 0:
+        return default
+    return float(np.mean(finite_values))
+
+
 def eval_agent(agent,args):
     mets=[]
     for ep in range(args.eval_episodes):
@@ -45,8 +66,16 @@ def eval_agent(agent,args):
         while not done and steps<1000:
             a=env.action_space.sample() if agent is None else np.asarray(agent.get_action(jax.random.PRNGKey(args.seed+ep+steps), obs[None])[0])
             obs,r,term,trunc,info=env.step(a); done=term or trunc; ret+=r; steps+=1; falls.append(float(info.get('fall',0))); far.append(float(info.get('filter_active',0))); apr.append(float(info.get('projection_residual',0)))
-        mets.append(dict(return_=ret,episode_length=steps,FAR=np.mean(far),APR=np.mean(apr),fall_rate=np.max(falls) if falls else 0.0,success_rate=float(info.get("is_success", 0.0)),hand_dist=float(info.get('hand_dist',np.nan)),target_dist=float(info.get('target_dist',np.nan))))
-    keys=mets[0].keys(); return {k:float(np.nanmean([m[k] for m in mets])) for k in keys}
+        hand_dist = info.get("hand_dist", None)
+        target_dist = info.get("target_dist", None)
+        mets.append(dict(return_=ret,episode_length=steps,FAR=np.mean(far),APR=np.mean(apr),fall_rate=np.max(falls) if falls else 0.0,success_rate=float(info.get("is_success", 0.0)),hand_dist=float(hand_dist) if hand_dist is not None else np.nan,target_dist=float(target_dist) if target_dist is not None else np.nan))
+    keys = mets[0].keys()
+    result = {}
+    for k in keys:
+        value = safe_nanmean([m[k] for m in mets], default=None)
+        if value is not None:
+            result[k] = value
+    return result
 
 def main():
     p=argparse.ArgumentParser();
@@ -100,11 +129,14 @@ def main():
         nobs,reward,term,trunc,info=env.step(raw); exp=SafePullbackExperience.create(obs,raw,info['exec_action'],reward,term,trunc,nobs,info); buf.append(exp); buf=buf[-1_000_000:]; obs=nobs
         if term or trunc: obs,_=env.reset()
         for k,tg in [('reward','train_env/reward'),('filter_active','train_env/filter_active'),('projection_residual','train_env/projection_residual'),('projection_cost','train_env/projection_cost'),('fall','train_env/fall'),('head_height','train_env/head_height'),('torso_upright','train_env/torso_upright'),('joint_angle_abs_max','train_env/joint_angle_abs_max'),('joint_vel_abs_max','train_env/joint_vel_abs_max')]:
-            if k in info: writer.add_scalar(tg,float(info[k]),step)
+            if k in info:
+                val = info[k]
+                if is_finite_number(val):
+                    writer.add_scalar(tg, float(val), step)
         if step>=args.update_after and len(buf)>=args.batch_size:
             key,uk=jax.random.split(key); out=agent.update(uk,sample_batch(buf,args.batch_size)); out['step']=step; train.append(out)
             for k,v in out.items():
-                if k!='step': writer.add_scalar(f'train/{k}',float(v),step)
+                if k!='step' and is_finite_number(v): writer.add_scalar(f'train/{k}',float(v),step)
         if step % 10 == 0 or step == 1:
             elapsed = time.perf_counter() - train_start_time
             steps_per_sec = step / max(elapsed, 1e-8)
@@ -130,19 +162,26 @@ def main():
             elapsed = time.perf_counter() - train_start_time
             avg_steps_per_sec = step / max(elapsed, 1e-8)
             eta_sec = max(args.total_steps - step, 0) / max(avg_steps_per_sec, 1e-8)
-            pbar.write(
+            msg = (
                 f"[eval step {step}/{args.total_steps}] "
                 f"return={e.get('return_', float('nan')):.3f}, "
                 f"success={e.get('success_rate', float('nan')):.3f}, "
                 f"FAR={e.get('FAR', float('nan')):.3f}, "
                 f"APR={e.get('APR', float('nan')):.3f}, "
-                f"fall={e.get('fall_rate', float('nan')):.3f}, "
-                f"eval_time={eval_time:.1f}s, "
-                f"avg_sps={avg_steps_per_sec:.2f}, "
-                f"eta={eta_sec / 60:.1f}min"
+                f"fall={e.get('fall_rate', float('nan')):.3f}"
             )
+            if "hand_dist" in e and is_finite_number(e["hand_dist"]):
+                msg += f", hand_dist={e['hand_dist']:.3f}"
+            if "target_dist" in e and is_finite_number(e["target_dist"]):
+                msg += f", target_dist={e['target_dist']:.3f}"
+            msg += (
+                f", eval_time={eval_time:.1f}s"
+                f", avg_sps={avg_steps_per_sec:.2f}"
+                f", eta={eta_sec / 60:.1f}min"
+            )
+            pbar.write(msg)
             for k,v in e.items():
-                if k!='step': writer.add_scalar(f'eval/{k}',float(v),step)
+                if k!='step' and is_finite_number(v): writer.add_scalar(f'eval/{k}',float(v),step)
             writer.add_scalar("time/eval_time_sec", float(eval_time), step)
             writer.add_scalar("time/avg_steps_per_sec", float(avg_steps_per_sec), step)
             writer.add_scalar("time/eta_sec", float(eta_sec), step)
