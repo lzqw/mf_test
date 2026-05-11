@@ -10,6 +10,12 @@ class HumanoidSafeFilterConfig:
     action_limit: float = 1.0
     residual_radius: float = 0.35
     smooth_radius: float = 0.25
+    mode: str = "action"
+    max_delta: float = 0.1
+    target_step_radius: float = 0.08
+    reachable_radius: float = 0.45
+    z_min_safe: float = 0.4
+    z_max_safe: float = 1.8
     eps: float = 1e-6
 
 
@@ -60,6 +66,58 @@ class HumanoidSafeFilter:
             "prior_deviation": float(np.linalg.norm(exec_action - prior_action)),
         }
         return exec_action, info
+
+    def project_high_level_reach(
+        self,
+        raw_action: np.ndarray,
+        last_target: np.ndarray,
+        target_low: np.ndarray,
+        target_high: np.ndarray,
+        hand_pos: np.ndarray,
+        prior_action: Optional[np.ndarray] = None,
+    ) -> Tuple[np.ndarray, dict]:
+        del prior_action
+        raw_action = np.asarray(raw_action, dtype=np.float32).reshape(-1)
+        if raw_action.shape[0] != 3:
+            raise ValueError(f"Expected raw_action shape (3,), got {raw_action.shape}")
+        last_target = np.asarray(last_target, dtype=np.float32).reshape(3)
+        target_low = np.asarray(target_low, dtype=np.float32).reshape(3)
+        target_high = np.asarray(target_high, dtype=np.float32).reshape(3)
+        hand_pos = np.asarray(hand_pos, dtype=np.float32).reshape(3)
+
+        clipped_raw_action = np.clip(raw_action, -1.0, 1.0)
+        raw_target = last_target + self.cfg.max_delta * clipped_raw_action
+        filtered_target = raw_target.copy()
+
+        step_delta = filtered_target - last_target
+        step_norm = np.linalg.norm(step_delta)
+        if step_norm > self.cfg.target_step_radius:
+            filtered_target = last_target + step_delta * (self.cfg.target_step_radius / (step_norm + self.cfg.eps))
+
+        filtered_target = np.clip(filtered_target, target_low, target_high)
+        filtered_target[2] = np.clip(filtered_target[2], self.cfg.z_min_safe, self.cfg.z_max_safe)
+
+        reach_delta = filtered_target - hand_pos
+        reach_norm = np.linalg.norm(reach_delta)
+        if reach_norm > self.cfg.reachable_radius:
+            filtered_target = hand_pos + reach_delta * (self.cfg.reachable_radius / (reach_norm + self.cfg.eps))
+
+        filtered_action = (filtered_target - last_target) / self.cfg.max_delta
+        filtered_action = np.clip(filtered_action, -1.0, 1.0)
+
+        action_projection = filtered_action - raw_action
+        target_projection = filtered_target - raw_target
+        projection_residual = float(np.linalg.norm(action_projection))
+        info = {
+            "exec_action": filtered_action,
+            "projection_residual": projection_residual,
+            "projection_cost": float(np.sum(action_projection ** 2)),
+            "target_projection_residual": float(np.linalg.norm(target_projection)),
+            "filter_active": float(projection_residual > 1e-6 or np.linalg.norm(target_projection) > 1e-6),
+            "raw_target": raw_target,
+            "exec_target": filtered_target,
+        }
+        return filtered_action, info
 
 
 def project_action_jax_humanoid(raw_action: jnp.ndarray, prior_action: Optional[jnp.ndarray] = None,
