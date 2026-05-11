@@ -60,15 +60,18 @@ def safe_nanmean(values, default=None):
 
 def eval_agent(agent,args):
     mets=[]
-    for ep in range(args.eval_episodes):
-        env=SafeHumanoidBenchWrapper(args.env_name,use_filter=args.use_filter,filter_cfg=HumanoidSafeFilterConfig(residual_radius=args.residual_radius,smooth_radius=args.smooth_radius),policy_path=args.policy_path,mean_path=args.mean_path,var_path=args.var_path,policy_type=args.policy_type)
-        obs,_=env.reset(seed=args.seed+1000+ep); done=False; ret=0; steps=0; falls=[]; far=[]; apr=[]; info={}
-        while not done and steps<1000:
-            a=env.action_space.sample() if agent is None else np.asarray(agent.get_action(jax.random.PRNGKey(args.seed+ep+steps), obs[None])[0])
-            obs,r,term,trunc,info=env.step(a); done=term or trunc; ret+=r; steps+=1; falls.append(float(info.get('fall',0))); far.append(float(info.get('filter_active',0))); apr.append(float(info.get('projection_residual',0)))
-        hand_dist = info.get("hand_dist", None)
-        target_dist = info.get("target_dist", None)
-        mets.append(dict(return_=ret,episode_length=steps,FAR=np.mean(far),APR=np.mean(apr),fall_rate=np.max(falls) if falls else 0.0,success_rate=float(info.get("is_success", 0.0)),hand_dist=float(hand_dist) if hand_dist is not None else np.nan,target_dist=float(target_dist) if target_dist is not None else np.nan))
+    env=SafeHumanoidBenchWrapper(args.env_name,use_filter=args.use_filter,filter_cfg=HumanoidSafeFilterConfig(residual_radius=args.residual_radius,smooth_radius=args.smooth_radius),policy_path=args.policy_path,mean_path=args.mean_path,var_path=args.var_path,policy_type=args.policy_type)
+    try:
+        for ep in range(args.eval_episodes):
+            obs,_=env.reset(seed=args.seed+1000+ep); done=False; ret=0.0; steps=0; falls=[]; far=[]; apr=[]; info={}
+            while not done and steps<1000:
+                a=env.action_space.sample() if agent is None else np.asarray(agent.get_action(jax.random.PRNGKey(args.seed+ep+steps), obs[None])[0])
+                obs,r,term,trunc,info=env.step(a); done=term or trunc; ret+=float(r); steps+=1; falls.append(float(info.get('fall',0.0))); far.append(float(info.get('filter_active',0.0))); apr.append(float(info.get('projection_residual',0.0)))
+            hand_dist = info.get("hand_dist", None)
+            target_dist = info.get("target_dist", None)
+            mets.append(dict(return_=ret,episode_length=steps,FAR=float(np.mean(far)) if far else 0.0,APR=float(np.mean(apr)) if apr else 0.0,fall_rate=float(np.max(falls)) if falls else 0.0,success_rate=float(info.get("is_success", 0.0)),hand_dist=float(hand_dist) if hand_dist is not None else np.nan,target_dist=float(target_dist) if target_dist is not None else np.nan))
+    finally:
+        env.close()
     keys = mets[0].keys()
     result = {}
     for k in keys:
