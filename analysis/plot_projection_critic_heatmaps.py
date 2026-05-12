@@ -172,7 +172,18 @@ def plot_vp_heatmap(agent, env, cfg, out_path, method_name, gx, gy):
     fig.colorbar(im, ax=ax, label="$V_S(s)$")
 
     ax.add_patch(Circle(tuple(cfg.obstacle_center), cfg.obstacle_radius, fill=False, ec="red", lw=2.0, label="obstacle"))
-    ax.add_patch(Circle(tuple(cfg.obstacle_center), cfg.obstacle_radius_tight, fill=False, ec="orange", lw=1.8, ls="--", label="tightened obstacle"))
+    tight_radius = getattr(cfg, "obstacle_radius_tight", cfg.obstacle_radius + getattr(cfg, "eps_obs", 0.0))
+    ax.add_patch(
+        Circle(
+            tuple(cfg.obstacle_center),
+            tight_radius,
+            fill=False,
+            ec="orange",
+            lw=1.8,
+            ls="--",
+            label="tightened obstacle",
+        )
+    )
     goal = env.goal
     ax.add_patch(Circle((float(goal[0]), float(goal[1])), env.goal_radius, fill=False, ec="lime", lw=2.0, label="goal"))
     ax.add_patch(Rectangle((cfg.x_min, cfg.y_min), cfg.x_max - cfg.x_min, cfg.y_max - cfg.y_min, fill=False, ec="white", lw=1.6, ls=":"))
