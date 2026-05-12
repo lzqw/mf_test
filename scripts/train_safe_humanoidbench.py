@@ -58,6 +58,12 @@ def safe_nanmean(values, default=None):
     return float(np.mean(finite_values))
 
 
+def save_state_checkpoint(agent, path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "wb") as f:
+        pickle.dump(agent.state, f)
+
+
 def eval_agent(agent,args):
     mets=[]
     env=SafeHumanoidBenchWrapper(args.env_name,use_filter=args.use_filter,filter_cfg=HumanoidSafeFilterConfig(residual_radius=args.residual_radius,smooth_radius=args.smooth_radius,max_delta=args.max_delta,target_step_radius=args.target_step_radius,reachable_radius=args.reachable_radius,z_min_safe=args.z_min_safe,z_max_safe=args.z_max_safe),policy_path=args.policy_path,mean_path=args.mean_path,var_path=args.var_path,policy_type=args.policy_type)
@@ -123,6 +129,12 @@ def main():
         "FAR": float("nan"),
         "APR": float("nan"),
         "fall_rate": float("nan"),
+    }
+    best_metrics = {
+        "return_": {"value": -np.inf, "path": log / "best_return_checkpoint.pkl", "mode": "max"},
+        "hand_dist": {"value": np.inf, "path": log / "best_hand_dist_checkpoint.pkl", "mode": "min"},
+        "target_dist": {"value": np.inf, "path": log / "best_target_dist_checkpoint.pkl", "mode": "min"},
+        "success_rate": {"value": -np.inf, "path": log / "best_success_checkpoint.pkl", "mode": "max"},
     }
     pbar = tqdm(
         range(1, args.total_steps + 1),
@@ -194,6 +206,20 @@ def main():
             writer.add_scalar("time/avg_steps_per_sec", float(avg_steps_per_sec), step)
             writer.add_scalar("time/eta_sec", float(eta_sec), step)
             writer.flush()
+            checkpoint_dir = log / "checkpoints"
+            step_checkpoint_path = checkpoint_dir / f"checkpoint_step_{step}.pkl"
+            save_state_checkpoint(agent, step_checkpoint_path)
+            for metric_name, metric_cfg in best_metrics.items():
+                if metric_name not in e or not is_finite_number(e[metric_name]):
+                    continue
+                metric_value = float(e[metric_name])
+                is_better = metric_value > metric_cfg["value"] if metric_cfg["mode"] == "max" else metric_value < metric_cfg["value"]
+                if is_better:
+                    metric_cfg["value"] = metric_value
+                    save_state_checkpoint(agent, metric_cfg["path"])
+                    print(
+                        f"[best] step={step}, metric={metric_name}, value={metric_value}, saved={metric_cfg['path']}"
+                    )
     pbar.close()
     total_elapsed = time.perf_counter() - train_start_time
     print("=" * 80)
