@@ -2,6 +2,7 @@ import argparse
 import sys
 from pathlib import Path
 import numpy as np
+import pandas as pd
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
@@ -15,12 +16,10 @@ from envs.safe_obstacle_navigation_2d import SafeObstacleNavigation2DEnv
 from eval.eval_safe_obstacle_navigation import load_agent
 from relax.safety.obstacle_navigation_filter import ObstacleNavConfig, make_action_grid, project_action_np, is_action_feasible_np
 
-
 def entropy2d(samples, bins=40):
     H,_,_=np.histogram2d(samples[:,0], samples[:,1], bins=bins, range=[[-1,1],[-1,1]])
     p=H/(H.sum()+1e-8); nz=p>0
     return float(-(p[nz]*np.log(p[nz]+1e-8)).sum())
-
 
 def main():
     ap=argparse.ArgumentParser()
@@ -30,6 +29,7 @@ def main():
     ap.add_argument('--num_samples', type=int, default=800)
     ap.add_argument('--out_dir', default='paper_outputs/figures')
     ap.add_argument('--random_policy', action='store_true')
+    ap.add_argument('--method_name', default='unknown_method')
     args=ap.parse_args()
 
     cfg=ObstacleNavConfig(); grid=make_action_grid(81)
@@ -42,11 +42,10 @@ def main():
         if not args.checkpoint:
             raise ValueError('--checkpoint is required unless --random_policy is set')
         agent = load_agent(args.checkpoint, args.algo)
-
+    rows=[]
     for si,st in enumerate(args.state):
         pos=np.asarray(st,dtype=np.float32)
         obs = env._get_obs_from_state(pos)[None, :]
-
         if args.random_policy:
             raw=np.clip(rng.normal(size=(args.num_samples,2)).astype(np.float32),-1,1)
         else:
@@ -70,29 +69,28 @@ def main():
         raw_D_N, raw_D_T = float(np.std(raw_n)), float(np.std(raw_t))
         exec_D_N, exec_D_T = float(np.std(exe_n)), float(np.std(exe_t))
         proj_D_N, proj_D_T = float(np.std(proj_n)), float(np.std(proj_t))
-
-        print(
-            f"state={pos.tolist()} D_raw={D_raw:.6f} D_exec={D_exec:.6f} R_eff={R_eff:.6f} "
-            f"raw_D_N={raw_D_N:.6f} raw_D_T={raw_D_T:.6f} "
-            f"exec_D_N={exec_D_N:.6f} exec_D_T={exec_D_T:.6f} "
-            f"proj_D_N={proj_D_N:.6f} proj_D_T={proj_D_T:.6f} "
-            f"residual_mean={float(np.mean(residual)):.6f}"
-        )
+        residual_mean=float(np.mean(residual))
+        rows.append({
+            'method':args.method_name,'checkpoint':args.checkpoint,'state_x':float(pos[0]),'state_y':float(pos[1]),
+            'D_raw':D_raw,'D_exec':D_exec,'R_eff':R_eff,
+            'raw_D_N':raw_D_N,'raw_D_T':raw_D_T,'exec_D_N':exec_D_N,'exec_D_T':exec_D_T,
+            'proj_D_N':proj_D_N,'proj_D_T':proj_D_T,'residual_mean':residual_mean,
+        })
 
         fig,ax=plt.subplots(figsize=(6,6))
         ax.scatter(grid[feas,0], grid[feas,1], s=6, c='lightgray', label='feasible set')
-        if not args.random_policy:
-            ax.scatter(raw[:,0], raw[:,1], s=8, alpha=0.35, label='raw')
-            ax.scatter(exe[:,0], exe[:,1], s=8, alpha=0.35, label='exec')
-            idx=np.linspace(0,args.num_samples-1,min(120,args.num_samples),dtype=int)
-            for i in idx:
-                ax.plot([raw[i,0],exe[i,0]],[raw[i,1],exe[i,1]], c='k', alpha=0.15, lw=0.5)
+        ax.scatter(raw[:,0], raw[:,1], s=8, alpha=0.35, label='raw')
+        ax.scatter(exe[:,0], exe[:,1], s=8, alpha=0.35, label='exec')
+        idx=np.linspace(0,args.num_samples-1,min(120,args.num_samples),dtype=int)
+        for i in idx:
+            ax.plot([raw[i,0],exe[i,0]],[raw[i,1],exe[i,1]], c='k', alpha=0.15, lw=0.5)
         ax.arrow(0,0,dirn[0]*0.7,dirn[1]*0.7,color='r',width=0.01)
         ax.arrow(0,0,tangent[0]*0.7,tangent[1]*0.7,color='b',width=0.01)
         ax.set_xlim(-1,1); ax.set_ylim(-1,1)
-        ax.set_title(f"state=({pos[0]:.2f},{pos[1]:.2f})")
+        ax.set_title(f"{args.method_name} state=({pos[0]:.2f},{pos[1]:.2f})")
         ax.legend(fontsize=8, loc='upper left')
         fig.tight_layout(); fig.savefig(out/f'action_space_entropy_state{si}.png',dpi=220); fig.savefig(out/f'action_space_entropy_state{si}.pdf')
+    pd.DataFrame(rows).to_csv(out/'action_space_entropy_state_stats.csv', index=False)
 
 if __name__=='__main__':
     main()
