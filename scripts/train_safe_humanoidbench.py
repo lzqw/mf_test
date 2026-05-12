@@ -60,7 +60,7 @@ def safe_nanmean(values, default=None):
 
 def eval_agent(agent,args):
     mets=[]
-    env=SafeHumanoidBenchWrapper(args.env_name,use_filter=args.use_filter,filter_cfg=HumanoidSafeFilterConfig(residual_radius=args.residual_radius,smooth_radius=args.smooth_radius),policy_path=args.policy_path,mean_path=args.mean_path,var_path=args.var_path,policy_type=args.policy_type)
+    env=SafeHumanoidBenchWrapper(args.env_name,use_filter=args.use_filter,filter_cfg=HumanoidSafeFilterConfig(residual_radius=args.residual_radius,smooth_radius=args.smooth_radius,max_delta=args.max_delta,target_step_radius=args.target_step_radius,reachable_radius=args.reachable_radius,z_min_safe=args.z_min_safe,z_max_safe=args.z_max_safe),policy_path=args.policy_path,mean_path=args.mean_path,var_path=args.var_path,policy_type=args.policy_type)
     try:
         for ep in range(args.eval_episodes):
             obs,_=env.reset(seed=args.seed+1000+ep); done=False; ret=0.0; steps=0; falls=[]; far=[]; apr=[]; info={}
@@ -83,7 +83,7 @@ def eval_agent(agent,args):
 def main():
     p=argparse.ArgumentParser();
     for k,d,t in [('env_name','h1hand-reach-v0',str),('seed',0,int),('total_steps',1000000,int),('start_steps',10000,int),('update_after',10000,int),('batch_size',256,int),('eval_interval',10000,int),('eval_episodes',10,int),('log_dir',None,str)]: p.add_argument(f'--{k}',default=d,type=t,required=(k=='log_dir'))
-    p.add_argument('--use_filter',action='store_true'); p.add_argument('--residual_radius',type=float,default=0.35); p.add_argument('--smooth_radius',type=float,default=0.25)
+    p.add_argument('--use_filter',action='store_true'); p.add_argument('--residual_radius',type=float,default=0.35); p.add_argument('--smooth_radius',type=float,default=0.25); p.add_argument('--max_delta',type=float,default=0.1); p.add_argument('--target_step_radius',type=float,default=0.08); p.add_argument('--reachable_radius',type=float,default=0.45); p.add_argument('--z_min_safe',type=float,default=0.4); p.add_argument('--z_max_safe',type=float,default=1.8)
     p.add_argument('--lr',type=float,default=3e-4); p.add_argument('--alpha_lr',type=float,default=1e-2); p.add_argument('--gamma',type=float,default=0.99); p.add_argument('--gamma_p',type=float,default=0.99); p.add_argument('--sample_k',type=int,default=256); p.add_argument('--lambda_p',type=float,default=0.1); p.add_argument('--lambda_p_warmup_steps',type=int,default=100000); p.add_argument('--use_projection_critic',action='store_true')
     p.add_argument('--fixed_alpha',action='store_true'); p.add_argument('--alpha_value',type=float,default=0.1); p.add_argument('--init_alpha',type=float,default=0.1)
     p.add_argument('--diffusion_steps',type=int,default=10); p.add_argument('--num_ent_timesteps',type=int,default=10); p.add_argument('--policy_noise_scale',type=float,default=0.3)
@@ -91,7 +91,7 @@ def main():
     p.add_argument('--policy_path',type=str,default=None); p.add_argument('--mean_path',type=str,default=None); p.add_argument('--var_path',type=str,default=None); p.add_argument('--policy_type',type=str,default=None)
     args=p.parse_args(); np.random.seed(args.seed)
     log=Path(args.log_dir); log.mkdir(parents=True,exist_ok=True); writer=SummaryWriter(str(log/'tb')); (log/'args.json').write_text(json.dumps(vars(args),indent=2,sort_keys=True))
-    env=SafeHumanoidBenchWrapper(args.env_name,use_filter=args.use_filter,filter_cfg=HumanoidSafeFilterConfig(residual_radius=args.residual_radius,smooth_radius=args.smooth_radius),policy_path=args.policy_path,mean_path=args.mean_path,var_path=args.var_path,policy_type=args.policy_type); obs,_=env.reset(seed=args.seed)
+    env=SafeHumanoidBenchWrapper(args.env_name,use_filter=args.use_filter,filter_cfg=HumanoidSafeFilterConfig(residual_radius=args.residual_radius,smooth_radius=args.smooth_radius,max_delta=args.max_delta,target_step_radius=args.target_step_radius,reachable_radius=args.reachable_radius,z_min_safe=args.z_min_safe,z_max_safe=args.z_max_safe),policy_path=args.policy_path,mean_path=args.mean_path,var_path=args.var_path,policy_type=args.policy_type); obs,_=env.reset(seed=args.seed)
     print("=" * 80)
     print("HumanoidBench Safe-Pullback Training")
     print("env_name:", args.env_name)
@@ -104,6 +104,11 @@ def main():
     print("use_filter:", args.use_filter)
     print("residual_radius:", args.residual_radius)
     print("smooth_radius:", args.smooth_radius)
+    print("max_delta:", args.max_delta)
+    print("target_step_radius:", args.target_step_radius)
+    print("reachable_radius:", args.reachable_radius)
+    print("z_min_safe:", args.z_min_safe)
+    print("z_max_safe:", args.z_max_safe)
     print("entropy_reg_mode:", args.entropy_reg_mode)
     print("=" * 80)
     agent = make_algo(args, env.observation_space.shape[0], env.action_space.shape[0])
