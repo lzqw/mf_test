@@ -86,3 +86,9 @@ class SafeMetaDriveSampleWrapper(gym.Wrapper):
         info["state_violation"] = info["safe_violation"]
         info["is_success"] = float(success > 0.0)
         return obs, reward, terminated, truncated, info
+
+    def render(self, *args, **kwargs):
+        try:
+            return self.env.unwrapped.render(*args, **kwargs)
+        except AttributeError:
+            return self.env.render(*args, **kwargs)
