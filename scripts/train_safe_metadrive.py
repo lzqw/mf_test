@@ -35,7 +35,7 @@ def make_algo(args, obs_dim, act_dim):
         alpha_value=args.alpha_value, lambda_p_warmup_steps=args.lambda_p_warmup_steps, use_tn_energy=args.use_tn_energy,
         entropy_reg_mode=args.entropy_reg_mode, candidate_temp=args.candidate_temp, beta_normal_entropy=args.beta_normal_entropy,
         min_effective_entropy=args.min_effective_entropy, target_effective_entropy=args.target_effective_entropy,
-        normal_energy_coef=args.normal_energy_coef, weight_mix=args.weight_mix, action_limit=1.0)
+        normal_energy_coef=args.normal_energy_coef, weight_mix=args.weight_mix, residual_radius=args.residual_radius, action_limit=1.0)
 
 def is_finite_number(x):
     try:
@@ -60,6 +60,19 @@ def safe_nanmean(values, default=None):
         return default
     return float(np.mean(finite_values))
 
+def safe_nanmin(values, default=None):
+    finite_values = []
+    for v in values:
+        try:
+            fv = float(v)
+            if np.isfinite(fv):
+                finite_values.append(fv)
+        except Exception:
+            pass
+    if len(finite_values) == 0:
+        return default
+    return float(np.min(finite_values))
+
 
 def save_state_checkpoint(agent, path):
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -72,7 +85,7 @@ def eval_agent(agent,args):
     env=SafeMetaDriveSampleWrapper(args.env_name,use_filter=args.use_filter,filter_type=args.filter_type,filter_cfg=SampleVehicleFilterConfig(num_local_samples=args.num_local_samples,num_prev_samples=args.num_prev_samples,horizon=args.horizon,dt=args.dt,steer_limit=args.steer_limit,throttle_limit=args.throttle_limit,brake_limit=args.brake_limit,max_dsteer=args.max_dsteer,max_daccel=args.max_daccel,safe_radius=args.safe_radius,ttc_min=args.ttc_min,h_vo_margin=args.h_vo_margin,lane_margin_min=args.lane_margin_min),**build_env_kwargs(args))
     try:
         for ep in range(args.eval_episodes):
-            obs,_=env.reset(seed=args.seed+1000+ep); done=False; ret=0.0; steps=0; far=[]; apr=[]; info={}; costs=[]; vels=[]; nsc=[]; fbs=[]; vcr=[]; mpd=[]; mpt=[]; mph=[]; vov=[]; ttcv=[]; lv=[]; ft=[]
+            obs,_=env.reset(seed=args.seed+1000+ep); done=False; ret=0.0; steps=0; far=[]; apr=[]; info={}; costs=[]; vels=[]; nsc=[]; fbs=[]; crashes=[]; out_of_roads=[]; safe_violations=[]; sample_filter_active=[]; vcr=[]; mpd=[]; mpt=[]; mph=[]; vov=[]; ttcv=[]; lv=[]; ft=[]
             while not done and steps<1000:
                 a=env.action_space.sample() if agent is None else np.asarray(agent.get_action(jax.random.PRNGKey(args.seed+ep+steps), obs[None])[0])
                 obs,r,term,trunc,info=env.step(a); done=term or trunc; ret+=float(r); steps+=1; far.append(float(info.get('filter_active',0.0))); apr.append(float(info.get('projection_residual',0.0))); costs.append(float(info.get('cost',0.0))); vels.append(float(info.get('velocity',0.0))); nsc.append(float(info.get('no_safe_candidate',0.0))); fbs.append(float(info.get('fallback',0.0))); vcr.append(float(info.get('valid_candidate_ratio',0.0))); mpd.append(float(info.get('min_pred_dist',np.nan))); mpt.append(float(info.get('min_pred_ttc',np.nan))); mph.append(float(info.get('min_pred_h_vo',np.nan))); vov.append(float(info.get('vo_violation',0.0))); ttcv.append(float(info.get('ttc_violation',0.0))); lv.append(float(info.get('lane_violation',0.0))); ft.append(float(info.get('filter_time_ms',0.0))); crashes.append(float(info.get('crash',0.0))); out_of_roads.append(float(info.get('out_of_road',0.0))); safe_violations.append(float(info.get('safe_violation',0.0))); sample_filter_active.append(float(info.get('sample_filter_active',0.0)))
