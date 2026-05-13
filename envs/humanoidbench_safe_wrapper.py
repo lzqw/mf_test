@@ -84,19 +84,24 @@ class SafeHumanoidBenchWrapper(gym.Wrapper):
             }
         next_obs, reward, terminated, truncated, info = self.env.step(exec_action)
         info = dict(info)
+        success_flag = bool(info.get("success", False)) or float(info.get("reward_success", 0.0) > 0.0)
+        terminated_failure = float(bool(terminated) and not success_flag)
         info.update(filter_info)
         info.update(self._get_safety_metrics())
+        info["terminated_failure"] = terminated_failure
+        if terminated_failure > 0:
+            info["fall"] = max(float(info.get("fall", 0.0)), 1.0)
         info["raw_action"] = raw_action
         info["action"] = exec_action
-        info.setdefault("safe_violation", info.get("fall", 0.0))
-        info.setdefault("state_violation", info.get("fall", 0.0))
+        info["safe_violation"] = max(float(info.get("fall", 0.0)), terminated_failure)
+        info["state_violation"] = max(float(info.get("fall", 0.0)), terminated_failure)
         success_value = info.get("success", None)
         if success_value is None:
             success_value = float(info.get("reward_success", 0.0) > 0.0)
         else:
             success_value = float(success_value)
 
-        info.setdefault("is_success", success_value)
+        info["is_success"] = float(success_value > 0.0)
         return next_obs, reward, terminated, truncated, info
 
     def _project_action(self, raw_action: np.ndarray):
