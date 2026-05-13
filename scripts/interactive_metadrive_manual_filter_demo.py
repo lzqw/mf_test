@@ -72,6 +72,13 @@ def _build_passthrough_info(raw_action, exec_action):
         "min_pred_ttc": np.inf,
         "min_pred_h_vo": np.inf,
         "filter_time_ms": 0.0,
+        "selected_candidate_type": "none",
+        "selected_is_maneuver": 0.0,
+        "predicted_opposite_lane": 0.0,
+        "min_corridor_margin": float("inf"),
+        "max_abs_lateral": 0.0,
+        "longitudinal_progress": 0.0,
+        "pass_obstacle_bonus": 0.0,
     }
 
 
@@ -180,6 +187,13 @@ def main():
                 f"min_pred_ttc={filter_info.get('min_pred_ttc', np.inf):.3f}",
                 f"min_pred_h_vo={filter_info.get('min_pred_h_vo', np.inf):.3f}",
                 f"min_pred_dist={filter_info.get('min_pred_dist', np.inf):.3f}",
+                f"selected_candidate_type={filter_info.get('selected_candidate_type', 'n/a')}",
+                f"selected_is_maneuver={filter_info.get('selected_is_maneuver', 0)}",
+                f"predicted_opposite_lane={filter_info.get('predicted_opposite_lane', 0)}",
+                f"min_corridor_margin={filter_info.get('min_corridor_margin', np.inf):.3f}",
+                f"max_abs_lateral={filter_info.get('max_abs_lateral', 0):.3f}",
+                f"longitudinal_progress={filter_info.get('longitudinal_progress', 0):.3f}",
+                f"pass_obstacle_bonus={filter_info.get('pass_obstacle_bonus', 0):.3f}",
                 f"filter_time_ms={filter_info.get('filter_time_ms', 0):.2f}",
                 f"crash={info.get('crash', 0)}",
                 f"out_of_road={info.get('out_of_road', 0)}",
