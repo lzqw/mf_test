@@ -2,7 +2,10 @@ import numpy as np
 from gymnasium import Env, Wrapper, make, register
 from gymnasium.spaces import Box
 
-from relax.env.vector import VectorEnv, SerialVectorEnv, GymProcessVectorEnv, PipeProcessVectorEnv, SpinlockProcessVectorEnv, FutexProcessVectorEnv
+try:
+    from relax.env.vector import VectorEnv, SerialVectorEnv, GymProcessVectorEnv, PipeProcessVectorEnv, SpinlockProcessVectorEnv, FutexProcessVectorEnv
+except Exception:
+    VectorEnv = SerialVectorEnv = GymProcessVectorEnv = PipeProcessVectorEnv = SpinlockProcessVectorEnv = FutexProcessVectorEnv = None
 register(
     id='FlatThreeLaneStraight',  # <-- 这是你将在训练脚本中使用的新 ID
     entry_point='relax.env.drive.lane_change:make_flat_metadrive_env',  # 指向你的创建函数
@@ -68,6 +71,8 @@ def create_env(name: str, seed: int, action_seed: int = 0):
     return env, env.obs_dim, env.act_dim
 
 def create_vector_env(name: str, num_envs: int, seed: int, action_seed: int = 0, mode: str = "serial", **kwargs):
+    if SerialVectorEnv is None:
+        raise ImportError("relax.env.vector is unavailable in this environment")
     Impl = {
         "serial": SerialVectorEnv,
         "gym": GymProcessVectorEnv,

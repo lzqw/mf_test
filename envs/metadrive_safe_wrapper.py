@@ -2,7 +2,7 @@ from typing import Any
 
 import gymnasium as gym
 import numpy as np
-import relax.env  # noqa: F401
+import relax.env.drive.lane_change  # noqa: F401
 
 from relax.safety.metadrive_sample_filter import SampleBasedVehicleSafetyFilter, SampleVehicleFilterConfig
 
