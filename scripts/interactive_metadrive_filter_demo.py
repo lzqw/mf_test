@@ -7,6 +7,18 @@ import relax.env.drive.lane_change  # noqa: F401
 from envs.metadrive_safe_wrapper import SafeMetaDriveSampleWrapper
 from relax.safety.metadrive_sample_filter import SampleVehicleFilterConfig
 
+def render_topdown(env, size):
+    try:
+        return env.render(mode="topdown", window=False, screen_size=(size, size))
+    except TypeError:
+        try:
+            return env.unwrapped.render(mode="topdown", window=False, screen_size=(size, size))
+        except TypeError:
+            try:
+                return env.unwrapped.render(mode="topdown", window=False, film_size=(size, size))
+            except TypeError:
+                return env.unwrapped.render(mode="topdown")
+
 def parse_args():
     p=argparse.ArgumentParser(); p.add_argument('--env_name',default='FlatThreeLaneStraight'); p.add_argument('--filter_type',default='sample_vo',choices=['none','rate','sample_vo']); p.add_argument('--use_filter',action='store_true'); p.add_argument('--seed',type=int,default=0); p.add_argument('--topdown_size',type=int,default=900)
     p.add_argument('--num_local_samples',type=int,default=64); p.add_argument('--num_prev_samples',type=int,default=32); p.add_argument('--horizon',type=int,default=8); p.add_argument('--dt',type=float,default=0.1); p.add_argument('--safe_radius',type=float,default=4.0); p.add_argument('--ttc_min',type=float,default=1.5); p.add_argument('--h_vo_margin',type=float,default=0.2); p.add_argument('--lane_margin_min',type=float,default=0.3); return p.parse_args()
@@ -35,8 +47,9 @@ def main():
         if key in [ord('q'),ord('Q'),27]: break
         raw=np.clip(raw,-1.0,1.0)
         obs,_,term,trunc,info=env.step(raw); step+=1
-        frame=env.render(mode='topdown',window=False,screen_size=(args.topdown_size,args.topdown_size))
-        if frame is None: frame=np.zeros((args.topdown_size,args.topdown_size,3),dtype=np.uint8)
+        frame = render_topdown(env, args.topdown_size)
+        if frame is None:
+            frame = np.zeros((args.topdown_size, args.topdown_size, 3), dtype=np.uint8)
         lines=[f'raw={raw}',f'exec={info.get("exec_action")}',f'filter_type={env.filter_type} use_filter={env.use_filter}',f'active={info.get("filter_active",0)} residual={info.get("projection_residual",0):.3f}',f'valid={info.get("num_valid_candidates",0)}/{info.get("num_candidates",0)} ratio={info.get("valid_candidate_ratio",0):.2f}',f'fallback={info.get("fallback",0)} no_safe={info.get("no_safe_candidate",0)}',f'min_ttc={info.get("min_pred_ttc",np.inf):.3f} min_h={info.get("min_pred_h_vo",np.inf):.3f} min_d={info.get("min_pred_dist",np.inf):.3f}',f'filter_ms={info.get("filter_time_ms",0):.2f} crash={info.get("crash",0)} out={info.get("out_of_road",0)} cost={info.get("cost",0)} succ={info.get("is_success",0)}']
         y=24
         for ln in lines: cv2.putText(frame,ln,(10,y),cv2.FONT_HERSHEY_SIMPLEX,0.55,(255,255,255),1,cv2.LINE_AA); y+=22
