@@ -22,16 +22,18 @@ register(
     max_episode_steps=1000  # 你可以根据需要调整这个值
 )
 
-def make_flat_metadrive_env():
+def make_flat_metadrive_env(**kwargs):
     """
     这是一个辅助函数，用于创建 MetaDrive 环境
     并应用 FlattenObservation 包装器。
     """
     # 你可以在这里传递配置，例如禁用渲染以加快训练速度
+    kwargs.pop("render_mode", None)
     config = {
         "use_render": False,
         "log_level": 50  # 设置为 ERROR，减少不必要的日志输出
     }
+    config.update(kwargs)
     env = ThreeLaneStraightEnv(config)
 
     # 关键步骤：将 Dict 观测空间 扁平化为 Box 空间

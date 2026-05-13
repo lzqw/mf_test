@@ -1,0 +1,13 @@
+python scripts/interactive_metadrive_filter_demo.py \
+  --env_name FlatThreeLaneStraight \
+  --filter_type sample_vo \
+  --use_filter \
+  --seed 0 \
+  --num_local_samples 64 \
+  --num_prev_samples 32 \
+  --horizon 8 \
+  --dt 0.1 \
+  --safe_radius 4.0 \
+  --ttc_min 1.5 \
+  --h_vo_margin 0.2 \
+  --lane_margin_min 0.3

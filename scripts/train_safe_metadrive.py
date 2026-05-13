@@ -69,18 +69,14 @@ def save_state_checkpoint(agent, path):
 
 def eval_agent(agent,args):
     mets=[]
-    env=SafeMetaDriveSampleWrapper(args.env_name,use_filter=args.use_filter,filter_cfg=SampleVehicleFilterConfig(num_local_samples=args.num_local_samples,num_prev_samples=args.num_prev_samples,horizon=args.horizon,dt=args.dt,steer_limit=args.steer_limit,throttle_limit=args.throttle_limit,brake_limit=args.brake_limit,max_dsteer=args.max_dsteer,max_daccel=args.max_daccel,safe_radius=args.safe_radius,ttc_min=args.ttc_min,h_vo_margin=args.h_vo_margin,lane_margin_min=args.lane_margin_min),**build_env_kwargs(args))
+    env=SafeMetaDriveSampleWrapper(args.env_name,use_filter=args.use_filter,filter_type=args.filter_type,filter_cfg=SampleVehicleFilterConfig(num_local_samples=args.num_local_samples,num_prev_samples=args.num_prev_samples,horizon=args.horizon,dt=args.dt,steer_limit=args.steer_limit,throttle_limit=args.throttle_limit,brake_limit=args.brake_limit,max_dsteer=args.max_dsteer,max_daccel=args.max_daccel,safe_radius=args.safe_radius,ttc_min=args.ttc_min,h_vo_margin=args.h_vo_margin,lane_margin_min=args.lane_margin_min),**build_env_kwargs(args))
     try:
         for ep in range(args.eval_episodes):
-            obs,_=env.reset(seed=args.seed+1000+ep); done=False; ret=0.0; steps=0; falls=[]; far=[]; apr=[]; info={}; last_term=False; last_trunc=False
+            obs,_=env.reset(seed=args.seed+1000+ep); done=False; ret=0.0; steps=0; far=[]; apr=[]; info={}; costs=[]; vels=[]; nsc=[]; fbs=[]; vcr=[]; mpd=[]; mpt=[]; mph=[]; vov=[]; ttcv=[]; lv=[]; ft=[]
             while not done and steps<1000:
                 a=env.action_space.sample() if agent is None else np.asarray(agent.get_action(jax.random.PRNGKey(args.seed+ep+steps), obs[None])[0])
-                obs,r,term,trunc,info=env.step(a); done=term or trunc; ret+=float(r); steps+=1; falls.append(float(info.get('fall',0.0))); far.append(float(info.get('filter_active',0.0))); apr.append(float(info.get('projection_residual',0.0))); last_term=bool(term); last_trunc=bool(trunc)
-            hand_dist = info.get("hand_dist", None)
-            target_dist = info.get("target_dist", None)
-            metric = dict(return_=ret,episode_length=steps,FAR=float(np.mean(far)) if far else 0.0,APR=float(np.mean(apr)) if apr else 0.0,fall_rate=float(np.max(falls)) if falls else 0.0,success_rate=float(info.get("is_success", 0.0)),hand_dist=float(hand_dist) if hand_dist is not None else np.nan,target_dist=float(target_dist) if target_dist is not None else np.nan,early_termination_rate=float(last_term and float(info.get("is_success", 0.0)) <= 0.0))
-            if "terminated_failure" in info:
-                metric["terminated_failure_rate"] = float(info.get("terminated_failure", 0.0))
+                obs,r,term,trunc,info=env.step(a); done=term or trunc; ret+=float(r); steps+=1; far.append(float(info.get('filter_active',0.0))); apr.append(float(info.get('projection_residual',0.0))); costs.append(float(info.get('cost',0.0))); vels.append(float(info.get('velocity',0.0))); nsc.append(float(info.get('no_safe_candidate',0.0))); fbs.append(float(info.get('fallback',0.0))); vcr.append(float(info.get('valid_candidate_ratio',0.0))); mpd.append(float(info.get('min_pred_dist',np.nan))); mpt.append(float(info.get('min_pred_ttc',np.nan))); mph.append(float(info.get('min_pred_h_vo',np.nan))); vov.append(float(info.get('vo_violation',0.0))); ttcv.append(float(info.get('ttc_violation',0.0))); lv.append(float(info.get('lane_violation',0.0))); ft.append(float(info.get('filter_time_ms',0.0)))
+            metric = dict(return_=ret,episode_length=steps,success_rate=float(info.get("is_success",0.0)),crash_rate=float(info.get("crash",0.0)),out_of_road_rate=float(info.get("out_of_road",0.0)),cost_mean=float(np.mean(costs)) if costs else 0.0,velocity_mean=float(np.mean(vels)) if vels else 0.0,FAR=float(np.mean(far)) if far else 0.0,APR=float(np.mean(apr)) if apr else 0.0,safe_violation_rate=float(info.get("safe_violation",0.0)),sample_filter_active_rate=float(np.mean(far)) if far else 0.0,no_safe_candidate_rate=float(np.mean(nsc)) if nsc else 0.0,fallback_rate=float(np.mean(fbs)) if fbs else 0.0,valid_candidate_ratio=float(np.mean(vcr)) if vcr else 0.0,min_pred_dist=safe_nanmean(mpd,0.0),min_pred_ttc=safe_nanmean(mpt,0.0),min_pred_h_vo=safe_nanmean(mph,0.0),vo_violation_rate=float(np.mean(vov)) if vov else 0.0,ttc_violation_rate=float(np.mean(ttcv)) if ttcv else 0.0,lane_violation_rate=float(np.mean(lv)) if lv else 0.0,filter_time_ms=float(np.mean(ft)) if ft else 0.0)
             mets.append(metric)
     finally:
         env.close()
@@ -102,7 +98,7 @@ def main():
     p.add_argument('--entropy_reg_mode',choices=['legacy','likelihood_tn','flac_tn'],default='legacy'); p.add_argument('--use_tn_energy',action='store_true'); p.add_argument('--candidate_temp',type=float,default=0.1); p.add_argument('--beta_normal_entropy',type=float,default=1.0); p.add_argument('--min_effective_entropy',type=float,default=-20.0); p.add_argument('--target_effective_entropy',type=float,default=1.0); p.add_argument('--normal_energy_coef',type=float,default=0.05); p.add_argument('--weight_mix',type=float,default=0.05)
     args=p.parse_args(); np.random.seed(args.seed)
     log=Path(args.log_dir); log.mkdir(parents=True,exist_ok=True); writer=SummaryWriter(str(log/'tb')); (log/'args.json').write_text(json.dumps(vars(args),indent=2,sort_keys=True))
-    env=SafeMetaDriveSampleWrapper(args.env_name,use_filter=args.use_filter,filter_cfg=SampleVehicleFilterConfig(num_local_samples=args.num_local_samples,num_prev_samples=args.num_prev_samples,horizon=args.horizon,dt=args.dt,steer_limit=args.steer_limit,throttle_limit=args.throttle_limit,brake_limit=args.brake_limit,max_dsteer=args.max_dsteer,max_daccel=args.max_daccel,safe_radius=args.safe_radius,ttc_min=args.ttc_min,h_vo_margin=args.h_vo_margin,lane_margin_min=args.lane_margin_min),**build_env_kwargs(args)); obs,_=env.reset(seed=args.seed)
+    env=SafeMetaDriveSampleWrapper(args.env_name,use_filter=args.use_filter,filter_type=args.filter_type,filter_cfg=SampleVehicleFilterConfig(num_local_samples=args.num_local_samples,num_prev_samples=args.num_prev_samples,horizon=args.horizon,dt=args.dt,steer_limit=args.steer_limit,throttle_limit=args.throttle_limit,brake_limit=args.brake_limit,max_dsteer=args.max_dsteer,max_daccel=args.max_daccel,safe_radius=args.safe_radius,ttc_min=args.ttc_min,h_vo_margin=args.h_vo_margin,lane_margin_min=args.lane_margin_min),**build_env_kwargs(args)); obs,_=env.reset(seed=args.seed)
     print("=" * 80)
     print("MetaDrive Safe-Pullback Training")
     print("env_name:", args.env_name)
@@ -125,13 +121,13 @@ def main():
         "success_rate": float("nan"),
         "FAR": float("nan"),
         "APR": float("nan"),
-        "fall_rate": float("nan"),
+        "crash_rate": float("nan"),
+        "out_of_road_rate": float("nan"),
     }
     best_metrics = {
         "return_": {"value": -np.inf, "path": log / "best_return_checkpoint.pkl", "mode": "max"},
-        "hand_dist": {"value": np.inf, "path": log / "best_hand_dist_checkpoint.pkl", "mode": "min"},
-        "target_dist": {"value": np.inf, "path": log / "best_target_dist_checkpoint.pkl", "mode": "min"},
         "success_rate": {"value": -np.inf, "path": log / "best_success_checkpoint.pkl", "mode": "max"},
+        "safety_score": {"value": np.inf, "path": log / "best_safety_checkpoint.pkl", "mode": "min"},
     }
     pbar = tqdm(
         range(1, args.total_steps + 1),
@@ -167,7 +163,7 @@ def main():
                     "r": f"{float(reward):.2f}",
                     "FAR": f"{float(info.get('filter_active', 0.0)):.2f}",
                     "APR": f"{float(info.get('projection_residual', 0.0)):.3f}",
-                    "fall": f"{float(info.get('fall', 0.0)):.0f}",
+                    "cost": f"{float(info.get('cost', 0.0)):.2f}",
                     "eval_ret": f"{last_eval_metrics.get('return_', float('nan')):.1f}",
                     "succ": f"{last_eval_metrics.get('success_rate', float('nan')):.2f}",
                     "sps": f"{steps_per_sec:.1f}",
@@ -178,6 +174,7 @@ def main():
             e=eval_agent(agent,args)
             eval_time = time.perf_counter() - eval_start
             e['step']=step
+            e['safety_score']=float(e.get('crash_rate',0.0)+e.get('out_of_road_rate',0.0)+e.get('cost_mean',0.0)+e.get('fallback_rate',0.0))
             e["eval_time_sec"] = float(eval_time)
             ev.append(e)
             last_eval_metrics.update(e)
@@ -190,12 +187,8 @@ def main():
                 f"success={e.get('success_rate', float('nan')):.3f}, "
                 f"FAR={e.get('FAR', float('nan')):.3f}, "
                 f"APR={e.get('APR', float('nan')):.3f}, "
-                f"fall={e.get('fall_rate', float('nan')):.3f}"
+                f"crash={e.get('crash_rate', float('nan')):.3f}, out={e.get('out_of_road_rate', float('nan')):.3f}"
             )
-            if "hand_dist" in e and is_finite_number(e["hand_dist"]):
-                msg += f", hand_dist={e['hand_dist']:.3f}"
-            if "target_dist" in e and is_finite_number(e["target_dist"]):
-                msg += f", target_dist={e['target_dist']:.3f}"
             msg += (
                 f", eval_time={eval_time:.1f}s"
                 f", avg_sps={avg_steps_per_sec:.2f}"
