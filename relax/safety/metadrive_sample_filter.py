@@ -63,10 +63,14 @@ class SampleBasedVehicleSafetyFilter:
             seen=set();
             for v in cands:
                 if v is None or v is ego: continue
-                vid=str(getattr(v,'id',id(v)))
+                ego_id = getattr(ego, 'id', None)
+                obs_id = getattr(v, 'id', None)
+                if obs_id is None:
+                    obs_id = id(v)
+                vid=str(obs_id)
                 if vid in seen: continue
                 name=str(getattr(v,'name',''))
-                if getattr(ego,'id',None)==getattr(v,'id',None) or (name and name==str(getattr(ego,'name',''))): continue
+                if (ego_id is not None and obs_id is not None and ego_id == obs_id) or (name and name==str(getattr(ego,'name',''))): continue
                 seen.add(vid)
                 pos=np.asarray(getattr(v,'position',[0.0,0.0]),dtype=np.float32); heading=float(getattr(v,'heading_theta',getattr(v,'heading',0.0)))
                 speed=float(getattr(v,'speed',np.linalg.norm(getattr(v,'velocity',[0.0,0.0])))); vel=np.asarray(getattr(v,'velocity',[speed*np.cos(heading),speed*np.sin(heading)]),dtype=np.float32)
@@ -86,7 +90,10 @@ class SampleBasedVehicleSafetyFilter:
     def project(self, raw_action, env=None, prev_exec_action=None):
         t0=time.perf_counter(); raw=np.asarray(raw_action,dtype=np.float32).reshape(2); prev=self.prev_exec_action if prev_exec_action is None else np.asarray(prev_exec_action,dtype=np.float32).reshape(2)
         clipped=self._box_rate(raw,prev); ego=self._extract_ego_state(env); obstacles=self._extract_obstacles(env); lane=self._extract_lane_info(env)
-        cands=[raw,np.clip(raw,-1,1),prev,np.zeros(2),np.array([0.0,self.cfg.brake_limit]),np.array([raw[0],-0.4])]
+        cands=[raw,np.clip(raw,-1,1),prev,np.zeros(2),np.array([0.0,self.cfg.brake_limit]),np.array([raw[0],-0.4]),np.array([0.3,-0.4]),np.array([-0.3,-0.4]),np.array([0.6,-0.6]),np.array([-0.6,-0.6])]
+        steering_grid=[-0.6,-0.3,0.0,0.3,0.6]
+        accel_grid=[self.cfg.brake_limit,-0.4,0.0,0.4]
+        cands += [np.array([st,ac],dtype=np.float32) for st in steering_grid for ac in accel_grid]
         cands+=[raw+self.rng.normal([0,0],[self.cfg.local_sigma_steer,self.cfg.local_sigma_accel]) for _ in range(self.cfg.num_local_samples)]
         cands+=[prev+self.rng.normal(0,self.cfg.prev_sigma,size=2) for _ in range(self.cfg.num_prev_samples)]
         cands=[self._box_rate(c,prev) for c in cands]

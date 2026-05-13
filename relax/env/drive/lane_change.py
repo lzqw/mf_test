@@ -8,16 +8,17 @@ from metadrive.component.map.base_map import BaseMap
 from metadrive.component.map.pg_map import MapGenerateMethod, FirstPGBlock
 
 # ===== 可调参数（如需更远就把 REL 调大一些）=====
-OBSTACLE_OFFSET_REL = 1.5       # 相对距离倍数：s = s0 + REL*L + M
+OBSTACLE_OFFSET_REL = 0.5       # 相对距离倍数：s = s0 + REL*L + M
 OBSTACLE_OFFSET_M   = 0.0       # 绝对偏移（米，正向前、负向后）
 SAFETY_MARGIN_END   = 2.0       # 距离段尾安全余量（米）
 import gymnasium as gym
 from gymnasium.wrappers import FlattenObservation
-from gymnasium.envs.registration import register
+from gymnasium.envs.registration import register, registry
 # 注册你的新环境
 sys.path.append(".")  # 确保当前目录在路径中，以便找到 lane_change 模块
-register(
-    id='FlatThreeLaneStraight',  # <-- 这是你将在训练脚本中使用的新 ID
+if "FlatThreeLaneStraight" not in registry:
+    register(
+        id='FlatThreeLaneStraight',  # <-- 这是你将在训练脚本中使用的新 ID
     entry_point='relax.env.drive.lane_change:make_flat_metadrive_env',  # 指向你的创建函数
     max_episode_steps=1000  # 你可以根据需要调整这个值
 )
@@ -108,13 +109,15 @@ class ThreeLaneStraightEnv(SafeMetaDriveEnv):
             random_traffic=False,
             accident_prob=0.0,
             traffic_mode="NoTraffic",
+            obstacle_offset_rel=OBSTACLE_OFFSET_REL,
+            obstacle_offset_m=OBSTACLE_OFFSET_M,
+            safety_margin_end=SAFETY_MARGIN_END,
         ))
         return cfg
 
     # 兼容 Gym / Gymnasium 的 reset（MetaDrive 0.4.3 无 options 参数）
     def reset(self, seed=None, options=None):
         # 在 reset 前仅清理我们手动生成的上轮“停靠车”，并强制 flush 清理队列
-        seed=0
         try:
             eng = getattr(self, "engine", None)
             pk = getattr(self, "_parked_obj", None)
@@ -153,8 +156,9 @@ class ThreeLaneStraightEnv(SafeMetaDriveEnv):
         s0 = float(self.config["agent_configs"]["default_agent"]["spawn_longitude"])
 
         # 目标位置：s0 + REL*L + M（并夹到 [0, L - SAFETY_MARGIN_END]）
-        s_raw = s0 + OBSTACLE_OFFSET_REL * L + OBSTACLE_OFFSET_M
-        s_target = max(0.0, min(s_raw, max(L - SAFETY_MARGIN_END, 0.0)))
+        s_raw = s0 + float(self.config.get("obstacle_offset_rel", OBSTACLE_OFFSET_REL)) * L + float(self.config.get("obstacle_offset_m", OBSTACLE_OFFSET_M))
+        safety_margin_end = float(self.config.get("safety_margin_end", SAFETY_MARGIN_END))
+        s_target = max(0.0, min(s_raw, max(L - safety_margin_end, 0.0)))
 
         # 世界位姿（x,y,heading）
         x, y = lane_S.position(s_target, 0.0)
