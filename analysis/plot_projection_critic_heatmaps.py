@@ -9,7 +9,8 @@ import numpy as np
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from matplotlib.patches import Circle, Rectangle
+from matplotlib.lines import Line2D
+from matplotlib.patches import Circle, FancyArrowPatch, Rectangle
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -33,6 +34,12 @@ def parse_args():
     ap.add_argument("--plot_vp_state_heatmap", action="store_true")
     ap.add_argument("--state_grid_x", type=int, default=181)
     ap.add_argument("--state_grid_y", type=int, default=121)
+    ap.add_argument("--make_paper_panel", action="store_true")
+    ap.add_argument("--rollouts_npz", type=str, default=None)
+    ap.add_argument("--fs_threshold", type=float, default=0.5)
+    ap.add_argument("--qs_threshold", type=float, default=None)
+    ap.add_argument("--quiver_stride", type=int, default=10)
+    ap.add_argument("--max_policy_samples_plot", type=int, default=120)
     return ap.parse_args()
 
 
@@ -102,6 +109,8 @@ def compute_state_panels(agent, env, cfg, action_grid, pos, tau_c, num_policy_sa
                 pol_res=pol_res, pol_feas=pol_feas, v_s=v_s)
 
 
+
+
 def plot_state_figure(out_path_base, method_name, pos, grid_x, grid_y, data):
     shape = grid_x.shape
     d_s = data["d_s"].reshape(shape)
@@ -125,7 +134,7 @@ def plot_state_figure(out_path_base, method_name, pos, grid_x, grid_y, data):
 
     im2 = axes[1, 0].imshow(f_s, extent=extent, origin="lower", cmap="viridis", aspect="equal")
     axes[1, 0].contour(grid_x, grid_y, feas, levels=[0.5], colors="w", linewidths=1.1)
-    axes[1, 0].set_title("Compatibility $F_S = e^{-Q_S^+/\\tau_c}$")
+    axes[1, 0].set_title("Compatibility $F_S = e^{-Q_S^+/\tau_c}$")
     fig.colorbar(im2, ax=axes[1, 0], fraction=0.046)
 
     im3 = axes[1, 1].imshow(q_s, extent=extent, origin="lower", cmap="viridis", aspect="equal", vmin=qvmin, vmax=qvmax)
@@ -173,17 +182,7 @@ def plot_vp_heatmap(agent, env, cfg, out_path, method_name, gx, gy):
 
     ax.add_patch(Circle(tuple(cfg.obstacle_center), cfg.obstacle_radius, fill=False, ec="red", lw=2.0, label="obstacle"))
     tight_radius = getattr(cfg, "obstacle_radius_tight", cfg.obstacle_radius + getattr(cfg, "eps_obs", 0.0))
-    ax.add_patch(
-        Circle(
-            tuple(cfg.obstacle_center),
-            tight_radius,
-            fill=False,
-            ec="orange",
-            lw=1.8,
-            ls="--",
-            label="tightened obstacle",
-        )
-    )
+    ax.add_patch(Circle(tuple(cfg.obstacle_center), tight_radius, fill=False, ec="orange", lw=1.8, ls="--", label="tightened obstacle"))
     goal = env.goal
     ax.add_patch(Circle((float(goal[0]), float(goal[1])), env.goal_radius, fill=False, ec="lime", lw=2.0, label="goal"))
     ax.add_patch(Rectangle((cfg.x_min, cfg.y_min), cfg.x_max - cfg.x_min, cfg.y_max - cfg.y_min, fill=False, ec="white", lw=1.6, ls=":"))
@@ -194,6 +193,119 @@ def plot_vp_heatmap(agent, env, cfg, out_path, method_name, gx, gy):
     fig.tight_layout()
     fig.savefig(str(out_path) + ".png", dpi=240)
     fig.savefig(str(out_path) + ".pdf")
+    plt.close(fig)
+
+def _draw_workspace(ax, env, cfg):
+    tight_radius = getattr(cfg, "obstacle_radius_tight", cfg.obstacle_radius + getattr(cfg, "eps_obs", 0.0))
+    ax.add_patch(Rectangle((cfg.x_min, cfg.y_min), cfg.x_max - cfg.x_min, cfg.y_max - cfg.y_min, fill=False, ec="k", lw=1.5))
+    ax.add_patch(Circle(tuple(cfg.obstacle_center), cfg.obstacle_radius, fill=False, ec="red", lw=2.0))
+    ax.add_patch(Circle(tuple(cfg.obstacle_center), tight_radius, fill=False, ec="orange", lw=1.8, ls="--"))
+    goal = env.goal
+    ax.add_patch(Circle((float(goal[0]), float(goal[1])), env.goal_radius, fill=False, ec="limegreen", lw=2.0))
+
+
+def plot_paper_panel(out_dir, method_name, env, cfg, grid_x, grid_y, state_entries, args):
+    ncols = len(state_entries) + 1
+    fig, axes = plt.subplots(2, ncols, figsize=(4.5 * ncols, 8.5), constrained_layout=True)
+
+    ax_task = axes[0, 0]
+    _draw_workspace(ax_task, env, cfg)
+    start = np.array([cfg.x_min + 0.4, 0.0])
+    goal = np.array(env.goal)
+    ax_task.scatter([start[0]], [start[1]], c="tab:blue", s=40)
+    ax_task.text(start[0] + 0.1, start[1], "start", fontsize=9)
+    ax_task.scatter([goal[0]], [goal[1]], c="tab:green", s=40)
+    ax_task.text(goal[0] + 0.1, goal[1], "goal", fontsize=9)
+    upper = np.array([cfg.obstacle_center[0], cfg.obstacle_center[1] + cfg.obstacle_radius + 0.5])
+    lower = np.array([cfg.obstacle_center[0], cfg.obstacle_center[1] - cfg.obstacle_radius - 0.5])
+    for mid in [upper, lower]:
+        ax_task.add_patch(FancyArrowPatch(start, mid, arrowstyle='->', mutation_scale=10, lw=1.4, color='tab:purple', alpha=0.8))
+        ax_task.add_patch(FancyArrowPatch(mid, goal, arrowstyle='->', mutation_scale=10, lw=1.4, color='tab:purple', alpha=0.8))
+    ax_task.set_title("(a) task description")
+
+    ax_dist = axes[1, 0]
+    _draw_workspace(ax_dist, env, cfg)
+    if args.rollouts_npz is not None:
+        dat = np.load(args.rollouts_npz)
+        pos = dat["positions"]
+        valid = dat["valid_lengths"]
+        pts = []
+        for i in range(len(valid)):
+            pts.append(pos[i, : int(valid[i]), :2])
+        pts = np.concatenate(pts, axis=0)
+        H, xedges, yedges = np.histogram2d(pts[:, 0], pts[:, 1], bins=[80, 50], range=[[cfg.x_min, cfg.x_max], [cfg.y_min, cfg.y_max]])
+        ax_dist.imshow(H.T, origin='lower', extent=[cfg.x_min, cfg.x_max, cfg.y_min, cfg.y_max], cmap='Blues', alpha=0.75, aspect='auto')
+        ax_dist.set_title("(b) trajectory distribution")
+    else:
+        x = np.linspace(cfg.x_min + 0.4, env.goal[0], 120)
+        y1 = 0.8 * np.sin(np.linspace(0, np.pi, 120)) + 0.8
+        y2 = -0.8 * np.sin(np.linspace(0, np.pi, 120)) - 0.8
+        ax_dist.plot(x, y1, color='tab:blue', alpha=0.35, lw=2)
+        ax_dist.plot(x, y2, color='tab:blue', alpha=0.35, lw=2)
+        ax_dist.set_title("(b) trajectory distribution (schematic)")
+
+    extent = [-1, 1, -1, 1]
+    top_im = None
+    bot_im = None
+    for j, entry in enumerate(state_entries, start=1):
+        pos = entry['pos']
+        data = entry['data']
+        q_s = data['q_s'].reshape(grid_x.shape)
+        f_s = data['f_s'].reshape(grid_x.shape)
+        d_s = data['d_s'].reshape(grid_x.shape)
+        feas = data['feasible'].reshape(grid_x.shape).astype(float)
+        ex = data['exec_actions'].reshape(grid_x.shape + (2,))
+        top = axes[0, j]
+        bot = axes[1, j]
+        top_im = top.imshow(f_s, extent=extent, origin='lower', cmap='turbo', aspect='equal', vmin=0.0, vmax=1.0)
+        top.contour(grid_x, grid_y, feas, levels=[0.5], colors='k', linewidths=1.2, linestyles='--')
+        top.contour(grid_x, grid_y, f_s, levels=[args.fs_threshold], colors='tab:blue', linewidths=1.5)
+        top.contour(grid_x, grid_y, d_s, levels=[np.nanpercentile(d_s, 20)], colors='white', linewidths=0.8, linestyles=':')
+
+        qvmin, qvmax = percentile_clip(data['q_s'])
+        bot_im = bot.imshow(q_s, extent=extent, origin='lower', cmap='magma', aspect='equal', vmin=qvmin, vmax=qvmax)
+        q_thr = args.qs_threshold if args.qs_threshold is not None else float(np.nanpercentile(q_s, 30))
+        bot.contour(grid_x, grid_y, feas, levels=[0.5], colors='k', linewidths=1.2, linestyles='--')
+        bot.contour(grid_x, grid_y, q_s, levels=[q_thr], colors='tab:blue', linewidths=1.5)
+
+        k = max(1, args.quiver_stride)
+        top.quiver(grid_x[::k, ::k], grid_y[::k, ::k], ex[::k, ::k, 0] - grid_x[::k, ::k], ex[::k, ::k, 1] - grid_y[::k, ::k],
+                   angles='xy', scale_units='xy', scale=1.0, color='k', alpha=0.4, width=0.002)
+        bot.quiver(grid_x[::k, ::k], grid_y[::k, ::k], ex[::k, ::k, 0] - grid_x[::k, ::k], ex[::k, ::k, 1] - grid_y[::k, ::k],
+                   angles='xy', scale_units='xy', scale=1.0, color='k', alpha=0.35, width=0.002)
+
+        ns = min(args.max_policy_samples_plot, data['pol_raw'].shape[0])
+        top.scatter(data['pol_raw'][:ns, 0], data['pol_raw'][:ns, 1], s=10, c='tab:orange', alpha=0.55)
+        top.scatter(data['pol_exec'][:ns, 0], data['pol_exec'][:ns, 1], s=10, c='tab:cyan', alpha=0.45)
+        bot.scatter(data['pol_raw'][:ns, 0], data['pol_raw'][:ns, 1], s=10, c='tab:orange', alpha=0.55)
+
+        top.set_title(f"state=({pos[0]:.2f},{pos[1]:.2f})")
+
+    for ax in axes.ravel():
+        ax.set_xlim(-1, 1) if ax not in [ax_task, ax_dist] else None
+        ax.set_ylim(-1, 1) if ax not in [ax_task, ax_dist] else None
+        if ax in [ax_task, ax_dist]:
+            ax.set_xlim(cfg.x_min, cfg.x_max)
+            ax.set_ylim(cfg.y_min, cfg.y_max)
+            ax.set_xlabel('x')
+            ax.set_ylabel('y')
+        else:
+            ax.set_xlabel('raw action dim 1')
+            ax.set_ylabel('raw action dim 2')
+
+    fig.colorbar(top_im, ax=axes[0, 1:], fraction=0.02, pad=0.02, label=r'compatibility $F_{\mathcal S}$')
+    fig.colorbar(bot_im, ax=axes[1, 1:], fraction=0.02, pad=0.02, label=r'projection critic $Q_{\mathcal S}$')
+    legend_handles = [
+        Line2D([0], [0], color='k', lw=1.2, ls='--', label='ground-truth feasible boundary'),
+        Line2D([0], [0], color='tab:blue', lw=1.5, label='learned feasible boundary'),
+        Line2D([0], [0], marker='o', color='tab:orange', lw=0, label='raw policy samples'),
+        Line2D([0], [0], marker='o', color='tab:cyan', lw=0, label='executed samples'),
+        Line2D([0], [0], color='k', lw=1.0, label='filter correction field'),
+    ]
+    fig.legend(handles=legend_handles, loc='lower center', ncol=5, fontsize=9)
+    fig.suptitle(f"{method_name}: projection critic panel", fontsize=14)
+    fig.savefig(out_dir / 'projection_critic_paper_panel.png', dpi=240)
+    fig.savefig(out_dir / 'projection_critic_paper_panel.pdf')
     plt.close(fig)
 
 
@@ -213,11 +325,12 @@ def main():
     action_grid = np.stack([grid_x.reshape(-1), grid_y.reshape(-1)], axis=-1).astype(np.float32)
 
     rows = []
+    state_entries = []
     for i, st in enumerate(args.states):
         pos = np.asarray(st, dtype=np.float32)
         data = compute_state_panels(agent, env, cfg, action_grid, pos, args.tau_c, args.num_policy_samples, seed=1000 + i)
+        state_entries.append({"pos": pos, "data": data})
         plot_state_figure(out_dir / f"projection_critic_heatmap_state{i}", args.method_name, pos, grid_x, grid_y, data)
-
         feas = data["feasible"]
         infeas = ~feas
         row = {
@@ -241,12 +354,23 @@ def main():
     if args.plot_vp_state_heatmap:
         plot_vp_heatmap(agent, env, cfg, out_dir / "vp_state_space_heatmap", args.method_name, args.state_grid_x, args.state_grid_y)
 
+    if args.make_paper_panel:
+        plot_paper_panel(out_dir, args.method_name, env, cfg, grid_x, grid_y, state_entries, args)
+
     fieldnames = [
         "method_name", "checkpoint", "state_x", "state_y", "corr_QS_dS", "spearman_QS_dS",
         "mean_QS_feasible", "mean_QS_infeasible", "mean_dS_feasible", "mean_dS_infeasible",
         "policy_QS_mean", "policy_dS_mean", "policy_projection_residual_mean", "policy_feasible_ratio",
     ]
-    with open(table_path, "w", newline="") as f:
+    write_header = not table_path.exists()
+    with open(table_path, "a", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        if write_header:
+            writer.writeheader()
+        writer.writerows(rows)
+
+    local_table_path = out_dir / "projection_critic_heatmap_stats.csv"
+    with open(local_table_path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
