@@ -1,0 +1,24 @@
+python scripts/train_safe_metadrive.py \
+  --env_name FlatThreeLaneStraight \
+  --log_dir runs/metadrive/sample_smoke_5k \
+  --seed 0 \
+  --total_steps 5000 \
+  --start_steps 1000 \
+  --update_after 1000 \
+  --batch_size 256 \
+  --eval_interval 1000 \
+  --eval_episodes 5 \
+  --use_filter \
+  --filter_type sample_vo \
+  --num_local_samples 64 \
+  --num_prev_samples 32 \
+  --horizon 8 \
+  --dt 0.1 \
+  --safe_radius 4.0 \
+  --ttc_min 1.5 \
+  --h_vo_margin 0.2 \
+  --lane_margin_min 0.3 \
+  --lambda_p 0.03 \
+  --use_projection_critic \
+  --use_tn_energy \
+  --entropy_reg_mode legacy
