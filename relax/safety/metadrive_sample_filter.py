@@ -28,6 +28,11 @@ class SampleVehicleFilterConfig:
     ttc_min: float = 1.5
     h_vo_margin: float = 0.2
     lane_margin_min: float = 0.3
+    vo_activation_distance: float = 12.0
+    ttc_activation_threshold: float = 3.0
+    min_closing_speed: float = 0.5
+    h_vo_tolerance: float = 0.05
+    allow_far_vo_pass: bool = True
     w_raw: float = 1.0; w_rate: float = 0.3; w_lane: float = 0.2; w_progress: float = 0.1; w_margin: float = 0.05
     eps: float = 1e-6
     seed: int = 0
@@ -97,24 +102,50 @@ class SampleBasedVehicleSafetyFilter:
         cands+=[raw+self.rng.normal([0,0],[self.cfg.local_sigma_steer,self.cfg.local_sigma_accel]) for _ in range(self.cfg.num_local_samples)]
         cands+=[prev+self.rng.normal(0,self.cfg.prev_sigma,size=2) for _ in range(self.cfg.num_prev_samples)]
         cands=[self._box_rate(c,prev) for c in cands]
+
         def eval_cand(a):
-            speed,hdg,x,y=ego['speed'],ego['heading'],ego['x'],ego['y']; min_d,min_ttc,min_h=np.inf,np.inf,np.inf; approaching=False
+            speed,hdg,x,y=ego['speed'],ego['heading'],ego['x'],ego['y']; min_d,min_ttc,min_h=np.inf,np.inf,np.inf
+            max_closing_speed=-np.inf; any_approaching=False; vo_active_any=False; ttc_active_any=False; min_h_vo_for_constraint=np.inf
             for _ in range(self.cfg.horizon):
                 hdg += self.cfg.k_steer*float(a[0])*self.cfg.dt; speed=np.clip(speed+self.cfg.k_accel*float(a[1])*self.cfg.dt,0.0,self.cfg.v_max)
                 x += speed*np.cos(hdg)*self.cfg.dt; y += speed*np.sin(hdg)*self.cfg.dt; ego_v=np.array([speed*np.cos(hdg),speed*np.sin(hdg)])
                 for ob in obstacles:
                     p_rel=np.array([ob['x']-x,ob['y']-y]); v_rel=ego_v-ob['v']; d=np.linalg.norm(p_rel); min_d=min(min_d,d)
-                    closing_speed=float(np.dot(p_rel,v_rel)/(d+self.cfg.eps)); R_rel=(self.cfg.ego_radius+self.cfg.obs_radius)
-                    if closing_speed>self.cfg.eps:
-                        approaching=True; ttc=(d-R_rel)/(closing_speed+self.cfg.eps); min_ttc=min(min_ttc,ttc)
-                        h=abs(p_rel[0]*v_rel[1]-p_rel[1]*v_rel[0]) - R_rel*np.linalg.norm(v_rel); min_h=min(min_h,h)
-            lane_margin=float(lane['lane_margin']); lane_ok=(not lane['lane_available']) or (lane_margin>=self.cfg.lane_margin_min)
-            valid=(min_d>=self.cfg.safe_radius) and ((not approaching) or (min_ttc>=self.cfg.ttc_min and min_h>=self.cfg.h_vo_margin)) and lane_ok
-            risk=(1000*float(min_d<self.cfg.safe_radius)+500*float(lane['lane_available'] and lane_margin<self.cfg.lane_margin_min)+50*max(0,self.cfg.ttc_min-(min_ttc if np.isfinite(min_ttc) else 0.0))+20*max(0,self.cfg.h_vo_margin-(min_h if np.isfinite(min_h) else 0.0))+10*max(0,self.cfg.safe_radius-min_d))
-            return dict(a=a,valid=valid,approaching=approaching,min_d=min_d,min_ttc=min_ttc,min_h=min_h,lane_margin=lane_margin,collision=float(min_d<self.cfg.safe_radius),offroad=float(lane['lane_available'] and lane_margin<self.cfg.lane_margin_min),progress=float(speed),lane_center_error=float(lane.get('lane_center_error',0.0)),margin_bonus=float(min_d),risk=risk)
-        evals=[eval_cand(a) for a in cands]; raw_eval=eval_cand(clipped); valids=[e for e in evals if e['valid']]; fallback=len(valids)==0
-        if raw_eval['valid']: best=raw_eval
-        elif valids: best=min(valids,key=lambda e:self.cfg.w_raw*np.sum((e['a']-raw)**2)+self.cfg.w_rate*np.sum((e['a']-prev)**2)+self.cfg.w_lane*e['lane_center_error']-self.cfg.w_progress*e['progress']-self.cfg.w_margin*e['margin_bonus'])
-        else: best=min(evals,key=lambda e:e['risk']+np.sum((e['a']-np.array([0.0,self.cfg.brake_limit]))**2))
+                    closing_speed=float(np.dot(p_rel,v_rel)/(d+self.cfg.eps)); max_closing_speed=max(max_closing_speed,closing_speed)
+                    approaching_step=closing_speed>self.cfg.min_closing_speed
+                    near_step=d<self.cfg.vo_activation_distance
+                    any_approaching = any_approaching or approaching_step
+                    R_rel=(self.cfg.ego_radius+self.cfg.obs_radius)
+                    if approaching_step:
+                        ttc=(d-R_rel)/(closing_speed+self.cfg.eps); min_ttc=min(min_ttc,ttc)
+                        ttc_active_step=ttc<self.cfg.ttc_activation_threshold
+                        ttc_active_any = ttc_active_any or ttc_active_step
+                    vo_active_step=approaching_step and near_step
+                    vo_active_any = vo_active_any or vo_active_step
+                    if vo_active_step:
+                        h=abs(p_rel[0]*v_rel[1]-p_rel[1]*v_rel[0]) - R_rel*np.linalg.norm(v_rel)
+                        min_h=min(min_h,h)
+                        min_h_vo_for_constraint=min(min_h_vo_for_constraint,h)
+            lane_margin=float(lane['lane_margin'])
+            collision_unsafe=min_d<self.cfg.safe_radius
+            ttc_unsafe=ttc_active_any and (min_ttc<self.cfg.ttc_min)
+            vo_unsafe=vo_active_any and (min_h_vo_for_constraint < (self.cfg.h_vo_margin-self.cfg.h_vo_tolerance))
+            lane_unsafe=lane['lane_available'] and lane_margin<self.cfg.lane_margin_min
+            valid=not (collision_unsafe or ttc_unsafe or vo_unsafe or lane_unsafe)
+            h_for_info=min_h_vo_for_constraint if vo_active_any else np.inf
+            risk=(1000*float(collision_unsafe)+500*float(lane_unsafe)+50*max(0,self.cfg.ttc_min-(min_ttc if np.isfinite(min_ttc) else self.cfg.ttc_min))+20*max(0,self.cfg.h_vo_margin-(min_h_vo_for_constraint if np.isfinite(min_h_vo_for_constraint) else self.cfg.h_vo_margin))+10*max(0,self.cfg.safe_radius-min_d))
+            return dict(a=a,valid=valid,any_approaching=any_approaching,vo_active_any=vo_active_any,ttc_active_any=ttc_active_any,min_d=min_d,min_ttc=min_ttc,min_h=h_for_info,min_h_constraint=min_h_vo_for_constraint,max_closing_speed=max_closing_speed,lane_margin=lane_margin,collision=collision_unsafe,offroad=lane_unsafe,ttc_unsafe=ttc_unsafe,vo_unsafe=vo_unsafe,lane_unsafe=lane_unsafe,progress=float(speed),lane_center_error=float(lane.get('lane_center_error',0.0)),margin_bonus=float(min_d),risk=risk)
+
+        evals=[eval_cand(a) for a in cands]
+        raw_eval=eval_cand(clipped)
+        if raw_eval['valid']:
+            best=raw_eval
+            valids=[e for e in evals if e['valid']]
+            fallback=False
+        else:
+            valids=[e for e in evals if e['valid']]
+            fallback=len(valids)==0
+            if valids: best=min(valids,key=lambda e:self.cfg.w_raw*np.sum((e['a']-raw)**2)+self.cfg.w_rate*np.sum((e['a']-prev)**2)+self.cfg.w_lane*e['lane_center_error']-self.cfg.w_progress*e['progress']-self.cfg.w_margin*e['margin_bonus'])
+            else: best=min(evals,key=lambda e:e['risk']+np.sum((e['a']-np.array([0.0,self.cfg.brake_limit]))**2))
         exec_action=np.clip(best['a'],-1.0,1.0).astype(np.float32); self.prev_exec_action=exec_action.copy(); diff=exec_action-raw
-        return exec_action, dict(raw_action=raw,exec_action=exec_action,projection_residual=float(np.linalg.norm(diff)),projection_cost=float(np.sum(diff**2)),filter_active=float(np.linalg.norm(diff)>1e-6),raw_action_norm=float(np.linalg.norm(raw)),exec_action_norm=float(np.linalg.norm(exec_action)),raw_steer=float(raw[0]),exec_steer=float(exec_action[0]),raw_accel=float(raw[1]),exec_accel=float(exec_action[1]),sample_filter_active=1.0,num_candidates=len(cands),num_valid_candidates=len(valids),valid_candidate_ratio=float(len(valids)/max(len(cands),1)),no_safe_candidate=float(fallback),fallback=float(fallback),least_risk_score=float(best['risk']),min_pred_dist=float(best['min_d']),min_pred_ttc=float(best['min_ttc']),min_pred_h_vo=float(best['min_h']),min_lane_margin=float(best['lane_margin']),vo_active=float(best['approaching']),ttc_violation=float(best['approaching'] and best['min_ttc']<self.cfg.ttc_min),vo_violation=float(best['approaching'] and best['min_h']<self.cfg.h_vo_margin),lane_violation=float(lane['lane_available'] and best['lane_margin']<self.cfg.lane_margin_min),predicted_collision=float(best['collision']),predicted_offroad=float(best['offroad']),filter_time_ms=float((time.perf_counter()-t0)*1000.0))
+        return exec_action, dict(raw_action=raw,exec_action=exec_action,projection_residual=float(np.linalg.norm(diff)),projection_cost=float(np.sum(diff**2)),filter_active=float(np.linalg.norm(exec_action-clipped)>1e-6),raw_action_norm=float(np.linalg.norm(raw)),exec_action_norm=float(np.linalg.norm(exec_action)),raw_steer=float(raw[0]),exec_steer=float(exec_action[0]),raw_accel=float(raw[1]),exec_accel=float(exec_action[1]),sample_filter_active=1.0,num_candidates=len(cands),num_valid_candidates=len(valids),valid_candidate_ratio=float(len(valids)/max(len(cands),1)),no_safe_candidate=float(len(valids)==0),fallback=float(fallback),least_risk_score=float(best['risk']),min_pred_dist=float(best['min_d']),min_pred_ttc=float(best['min_ttc']),min_pred_h_vo=float(best['min_h']),min_lane_margin=float(best['lane_margin']),vo_active=float(best['vo_active_any']),ttc_violation=float(best['ttc_unsafe']),vo_violation=float(best['vo_unsafe']),lane_violation=float(best['lane_unsafe']),predicted_collision=float(best['collision']),predicted_offroad=float(best['offroad']),filter_time_ms=float((time.perf_counter()-t0)*1000.0))
