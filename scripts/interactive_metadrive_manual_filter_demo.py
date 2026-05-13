@@ -13,7 +13,8 @@ import gymnasium as gym
 import numpy as np
 
 import relax.env.drive.lane_change  # noqa: F401
-from relax.safety.metadrive_sample_filter import SampleBasedVehicleSafetyFilter, SampleVehicleFilterConfig
+from relax.safety.metadrive_filtered_manual_policy import FilteredManualControlPolicy
+from relax.safety.metadrive_sample_filter import SampleVehicleFilterConfig
 
 
 def make_status_panel(lines, width=860, height=420):
@@ -41,85 +42,18 @@ def parse_args():
     p.add_argument("--ttc_min", type=float, default=1.5)
     p.add_argument("--h_vo_margin", type=float, default=0.2)
     p.add_argument("--lane_margin_min", type=float, default=0.3)
-    p.add_argument("--show_status_panel", action=argparse.BooleanOptionalAction, default=True)
+    p.add_argument("--show_status_panel", action=argparse.BooleanOptionalAction, default=False)
     p.add_argument("--print_every", type=int, default=20)
     return p.parse_args()
 
 
-def get_manual_policy(env):
+def get_current_policy(env):
     base = env.unwrapped
     agent = getattr(base, "agent", None)
     agent_id = getattr(agent, "id", None)
     if agent_id is None:
         agent_id = "default_agent"
     return base.engine.get_policy(agent_id)
-
-
-def _build_passthrough_info(raw_action, exec_action):
-    diff = exec_action - raw_action
-    return {
-        "raw_action": raw_action,
-        "exec_action": exec_action,
-        "filter_active": float(np.linalg.norm(diff) > 1e-6),
-        "projection_residual": float(np.linalg.norm(diff)),
-        "projection_cost": float(np.sum(diff ** 2)),
-        "num_candidates": 0,
-        "num_valid_candidates": 0,
-        "valid_candidate_ratio": 0.0,
-        "fallback": 0.0,
-        "no_safe_candidate": 0.0,
-        "min_pred_dist": np.inf,
-        "min_pred_ttc": np.inf,
-        "min_pred_h_vo": np.inf,
-        "filter_time_ms": 0.0,
-        "selected_candidate_type": "none",
-        "selected_is_maneuver": 0.0,
-        "predicted_opposite_lane": 0.0,
-        "min_corridor_margin": float("inf"),
-        "max_abs_lateral": 0.0,
-        "longitudinal_progress": 0.0,
-        "pass_obstacle_bonus": 0.0,
-    }
-
-
-def attach_filter_to_manual_policy(env, filt, args):
-    policy = get_manual_policy(env)
-    original_act = policy.act
-    policy._safe_filter_original_act = original_act
-    policy._safe_filter_prev_exec_action = np.zeros(2, dtype=np.float32)
-    policy._safe_filter_last_info = {}
-    policy._safe_filter_last_raw_action = np.zeros(2, dtype=np.float32)
-    policy._safe_filter_last_exec_action = np.zeros(2, dtype=np.float32)
-
-    def filtered_act(*a, **kw):
-        raw_action = np.asarray(original_act(*a, **kw), dtype=np.float32).reshape(2)
-
-        if (not args.use_filter) or args.filter_type == "none":
-            exec_action = np.clip(raw_action, -1.0, 1.0).astype(np.float32)
-            filter_info = _build_passthrough_info(raw_action, exec_action)
-        elif args.filter_type == "rate":
-            prev = policy._safe_filter_prev_exec_action
-            clipped = np.asarray(raw_action, dtype=np.float32).copy()
-            clipped[0] = np.clip(clipped[0], -0.7, 0.7)
-            clipped[1] = np.clip(clipped[1], -0.8, 0.8)
-            delta = np.clip(clipped - prev, [-0.12, -0.2], [0.12, 0.2])
-            exec_action = np.clip(prev + delta, -1.0, 1.0).astype(np.float32)
-            filter_info = _build_passthrough_info(raw_action, exec_action)
-        else:
-            exec_action, filter_info = filt.project(
-                raw_action,
-                env=env.unwrapped,
-                prev_exec_action=policy._safe_filter_prev_exec_action,
-            )
-
-        policy._safe_filter_prev_exec_action = np.asarray(exec_action, dtype=np.float32).copy()
-        policy._safe_filter_last_info = dict(filter_info)
-        policy._safe_filter_last_raw_action = raw_action.copy()
-        policy._safe_filter_last_exec_action = np.asarray(exec_action, dtype=np.float32).copy()
-        return exec_action
-
-    policy.act = filtered_act
-    return policy
 
 
 def main():
@@ -148,35 +82,64 @@ def main():
         h_vo_margin=args.h_vo_margin,
         lane_margin_min=args.lane_margin_min,
     )
-    filt = SampleBasedVehicleSafetyFilter(cfg)
+
+    FilteredManualControlPolicy.configure(
+        filter_cfg=cfg,
+        filter_type=args.filter_type,
+        use_filter=args.use_filter,
+        env_ref=None,
+    )
 
     env = gym.make(
         args.env_name,
         use_render=True,
         manual_control=True,
         controller="keyboard",
+        agent_policy=FilteredManualControlPolicy,
     )
+    FilteredManualControlPolicy.env_ref = env.unwrapped
 
     try:
-        obs, info = env.reset(seed=args.seed)
-        del obs, info
-        filt.reset()
-        attach_filter_to_manual_policy(env, filt, args)
+        _, _ = env.reset(seed=args.seed)
+        policy = get_current_policy(env)
+        if hasattr(policy, "reset_filter_state"):
+            policy.reset_filter_state()
+        if hasattr(policy, "expert_takeover"):
+            policy.expert_takeover = False
+        if hasattr(env.unwrapped.agent, "expert_takeover"):
+            env.unwrapped.agent.expert_takeover = False
+
+        print("Click the MetaDrive 3D window and use WASD. If the car does not respond, press T once to toggle manual/expert mode.")
 
         step = 0
+        startup_warned = False
         while True:
             _, _, terminated, truncated, info = env.step([0.0, 0.0])
             env.render()
             step += 1
 
-            policy = get_manual_policy(env)
-            filter_info = getattr(policy, "_safe_filter_last_info", {})
-            raw = getattr(policy, "_safe_filter_last_raw_action", np.zeros(2, dtype=np.float32))
-            exec_action = getattr(policy, "_safe_filter_last_exec_action", np.zeros(2, dtype=np.float32))
+            policy = get_current_policy(env)
+            filter_info = getattr(policy, "last_filter_info", {})
+            raw = np.asarray(getattr(policy, "last_raw_action", np.zeros(2)), dtype=np.float32)
+            exec_action = np.asarray(getattr(policy, "last_exec_action", np.zeros(2)), dtype=np.float32)
+            speed = float(getattr(env.unwrapped.agent, "speed", 0.0))
+
+            if (not startup_warned) and step <= 50 and float(np.linalg.norm(raw)) > 1e-4:
+                print("Warning: ManualControlPolicy is outputting nonzero raw action at startup. Check expert/takeover mode or stuck key state.")
+                startup_warned = True
+
+            if step <= 50:
+                print(
+                    f"[step {step:03d}] raw_action={raw} exec_action={exec_action} "
+                    f"filter_active={filter_info.get('filter_active', 0)} "
+                    f"projection_residual={filter_info.get('projection_residual', 0):.4f} "
+                    f"selected_candidate_type={filter_info.get('selected_candidate_type', 'n/a')} "
+                    f"speed={speed:.3f}"
+                )
 
             lines = [
-                f"raw action={np.asarray(raw)}",
-                f"exec action={np.asarray(exec_action)}",
+                f"raw action={raw}",
+                f"exec action={exec_action}",
                 f"filter_type={args.filter_type} use_filter={args.use_filter}",
                 f"filter_active={filter_info.get('filter_active', 0)}",
                 f"projection_residual={filter_info.get('projection_residual', 0):.3f}",
@@ -195,6 +158,7 @@ def main():
                 f"longitudinal_progress={filter_info.get('longitudinal_progress', 0):.3f}",
                 f"pass_obstacle_bonus={filter_info.get('pass_obstacle_bonus', 0):.3f}",
                 f"filter_time_ms={filter_info.get('filter_time_ms', 0):.2f}",
+                f"speed={speed:.3f}",
                 f"crash={info.get('crash', 0)}",
                 f"out_of_road={info.get('out_of_road', 0)}",
                 f"cost={info.get('cost', 0)}",
@@ -212,8 +176,13 @@ def main():
 
             if terminated or truncated:
                 _, _ = env.reset()
-                filt.reset()
-                attach_filter_to_manual_policy(env, filt, args)
+                policy = get_current_policy(env)
+                if hasattr(policy, "reset_filter_state"):
+                    policy.reset_filter_state()
+                if hasattr(policy, "expert_takeover"):
+                    policy.expert_takeover = False
+                if hasattr(env.unwrapped.agent, "expert_takeover"):
+                    env.unwrapped.agent.expert_takeover = False
 
             if not status_panel_enabled:
                 time.sleep(0.001)
