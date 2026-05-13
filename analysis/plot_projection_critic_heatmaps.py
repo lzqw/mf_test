@@ -293,8 +293,8 @@ def plot_paper_panel(out_dir, method_name, env, cfg, grid_x, grid_y, state_entri
             ax.set_xlabel('raw action dim 1')
             ax.set_ylabel('raw action dim 2')
 
-    fig.colorbar(top_im, ax=axes[0, 1:], fraction=0.02, pad=0.02, label=r'compatibility $F_{\mathcal S}$')
-    fig.colorbar(bot_im, ax=axes[1, 1:], fraction=0.02, pad=0.02, label=r'projection critic $Q_{\mathcal S}$')
+    fig.colorbar(top_im, ax=axes[0, 1:], fraction=0.02, pad=0.02, label=r'compatibility $F_{\mathcal{S}}$')
+    fig.colorbar(bot_im, ax=axes[1, 1:], fraction=0.02, pad=0.02, label=r'projection critic $Q_{\mathcal{S}}$')
     legend_handles = [
         Line2D([0], [0], color='k', lw=1.2, ls='--', label='ground-truth feasible boundary'),
         Line2D([0], [0], color='tab:blue', lw=1.5, label='learned feasible boundary'),
