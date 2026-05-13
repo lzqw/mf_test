@@ -13,8 +13,8 @@ import gymnasium as gym
 import numpy as np
 
 import relax.env.drive.lane_change  # noqa: F401
-from relax.safety.metadrive_filtered_manual_policy import FilteredManualControlPolicy
-from relax.safety.metadrive_sample_filter import SampleVehicleFilterConfig
+from relax.safety.metadrive_filtered_manual_policy import build_default_filter_info, rate_filter
+from relax.safety.metadrive_sample_filter import SampleBasedVehicleSafetyFilter, SampleVehicleFilterConfig
 
 
 def make_status_panel(lines, width=860, height=420):
@@ -53,6 +53,7 @@ def parse_args():
     p.add_argument("--min_closing_speed", type=float, default=0.5)
     p.add_argument("--num_maneuver_samples", type=int, default=32)
     p.add_argument("--show_status_panel", action=argparse.BooleanOptionalAction, default=False)
+    p.add_argument("--strict_filter_check", action=argparse.BooleanOptionalAction, default=True)
     p.add_argument("--print_every", type=int, default=20)
     return p.parse_args()
 
@@ -64,6 +65,54 @@ def get_current_policy(env):
     if agent_id is None:
         agent_id = "default_agent"
     return base.engine.get_policy(agent_id)
+
+
+def attach_filter_to_active_policy(env, filt, args):
+    policy = get_current_policy(env)
+
+    if getattr(policy, "_safe_filter_is_patched", False):
+        return policy
+
+    original_act = policy.act
+
+    policy._safe_filter_is_patched = True
+    policy._safe_filter_original_act = original_act
+    policy._safe_filter_prev_exec_action = np.zeros(2, dtype=np.float32)
+    policy._safe_filter_last_raw_action = np.zeros(2, dtype=np.float32)
+    policy._safe_filter_last_exec_action = np.zeros(2, dtype=np.float32)
+    policy._safe_filter_last_info = {}
+    policy._safe_filter_act_call_count = 0
+
+    def filtered_act(*a, **kw):
+        raw_action = np.asarray(original_act(*a, **kw), dtype=np.float32).reshape(2)
+
+        if (not args.use_filter) or args.filter_type == "none":
+            exec_action = np.clip(raw_action, -1.0, 1.0).astype(np.float32)
+            filter_info = build_default_filter_info(raw_action, exec_action)
+        elif args.filter_type == "rate":
+            exec_action, filter_info = rate_filter(raw_action, policy._safe_filter_prev_exec_action)
+        else:
+            exec_action, filter_info = filt.project(
+                raw_action,
+                env=env.unwrapped,
+                prev_exec_action=policy._safe_filter_prev_exec_action,
+            )
+
+        policy._safe_filter_act_call_count += 1
+        policy._safe_filter_prev_exec_action = np.asarray(exec_action, dtype=np.float32).copy()
+        policy._safe_filter_last_raw_action = raw_action.copy()
+        policy._safe_filter_last_exec_action = policy._safe_filter_prev_exec_action.copy()
+
+        filter_info = dict(filter_info)
+        filter_info["policy_type"] = type(policy).__name__
+        filter_info["act_call_count"] = policy._safe_filter_act_call_count
+        filter_info["is_policy_patched"] = 1.0
+        policy._safe_filter_last_info = filter_info
+
+        return exec_action
+
+    policy.act = filtered_act
+    return policy
 
 
 def main():
@@ -101,88 +150,64 @@ def main():
         min_closing_speed=args.min_closing_speed,
         num_maneuver_samples=args.num_maneuver_samples,
     )
-
-    FilteredManualControlPolicy.configure(
-        filter_cfg=cfg,
-        filter_type=args.filter_type,
-        use_filter=args.use_filter,
-        env_ref=None,
-    )
+    filt = SampleBasedVehicleSafetyFilter(cfg)
 
     env = gym.make(
         args.env_name,
         use_render=True,
         manual_control=True,
         controller="keyboard",
-        agent_policy=FilteredManualControlPolicy,
     )
-    FilteredManualControlPolicy.env_ref = env.unwrapped
 
     try:
         _, _ = env.reset(seed=args.seed)
-        policy = get_current_policy(env)
-        if hasattr(policy, "reset_filter_state"):
-            policy.reset_filter_state()
-        if hasattr(policy, "expert_takeover"):
-            policy.expert_takeover = False
-        if hasattr(env.unwrapped.agent, "expert_takeover"):
-            env.unwrapped.agent.expert_takeover = False
+        filt.reset()
+        base = env.unwrapped
+        agent_id = getattr(getattr(base, "agent", None), "id", "default_agent")
+        policy = attach_filter_to_active_policy(env, filt, args)
+        print(f"agent_id={agent_id}")
+        print(f"active_policy_type={type(policy).__name__}")
+        print(f"is_policy_patched={getattr(policy, '_safe_filter_is_patched', False)}")
+        print(f"manual_control={getattr(base, 'manual_control', 'n/a')}")
+        if not getattr(policy, "_safe_filter_is_patched", False):
+            raise RuntimeError("Failed to patch active policy.")
 
         print("Click the MetaDrive 3D window and use WASD. If the car does not respond, press T once to toggle manual/expert mode.")
 
         step = 0
-        startup_warned = False
         while True:
             _, _, terminated, truncated, info = env.step([0.0, 0.0])
             env.render()
             step += 1
 
             policy = get_current_policy(env)
-            filter_info = getattr(policy, "last_filter_info", {})
-            raw = np.asarray(getattr(policy, "last_raw_action", np.zeros(2)), dtype=np.float32)
-            exec_action = np.asarray(getattr(policy, "last_exec_action", np.zeros(2)), dtype=np.float32)
+            filter_info = getattr(policy, "_safe_filter_last_info", {})
+            raw = np.asarray(getattr(policy, "_safe_filter_last_raw_action", np.zeros(2)), dtype=np.float32)
+            exec_action = np.asarray(getattr(policy, "_safe_filter_last_exec_action", np.zeros(2)), dtype=np.float32)
+            act_call_count = int(getattr(policy, "_safe_filter_act_call_count", 0))
             speed = float(getattr(env.unwrapped.agent, "speed", 0.0))
 
-            if (not startup_warned) and step <= 50 and float(np.linalg.norm(raw)) > 1e-4:
-                print("Warning: ManualControlPolicy is outputting nonzero raw action at startup. Check expert/takeover mode or stuck key state.")
-                startup_warned = True
-
-            if step <= 50:
-                print(
-                    f"[step {step:03d}] raw_action={raw} exec_action={exec_action} "
-                    f"filter_active={filter_info.get('filter_active', 0)} "
-                    f"projection_residual={filter_info.get('projection_residual', 0):.4f} "
-                    f"selected_candidate_type={filter_info.get('selected_candidate_type', 'n/a')} "
-                    f"speed={speed:.3f}"
-                )
+            if args.strict_filter_check and step > 3 and args.use_filter and args.filter_type == "sample_vo":
+                if act_call_count == 0:
+                    raise RuntimeError("Filtered policy patch is not being called.")
+                if int(filter_info.get("num_candidates", 0)) == 0:
+                    raise RuntimeError("sample_vo filter is not running: num_candidates=0.")
 
             lines = [
+                f"policy_type={type(policy).__name__}",
+                f"is_policy_patched={getattr(policy, '_safe_filter_is_patched', False)}",
+                f"act_call_count={act_call_count}",
                 f"raw action={raw}",
                 f"exec action={exec_action}",
-                f"filter_type={args.filter_type} use_filter={args.use_filter}",
-                f"filter_active={filter_info.get('filter_active', 0)}",
-                f"projection_residual={filter_info.get('projection_residual', 0):.3f}",
                 f"num_valid_candidates / num_candidates={filter_info.get('num_valid_candidates', 0)}/{filter_info.get('num_candidates', 0)}",
-                f"valid_candidate_ratio={filter_info.get('valid_candidate_ratio', 0):.3f}",
-                f"fallback={filter_info.get('fallback', 0)}",
-                f"no_safe_candidate={filter_info.get('no_safe_candidate', 0)}",
-                f"min_pred_ttc={filter_info.get('min_pred_ttc', np.inf):.3f}",
-                f"min_pred_h_vo={filter_info.get('min_pred_h_vo', np.inf):.3f}",
-                f"min_pred_dist={filter_info.get('min_pred_dist', np.inf):.3f}",
                 f"selected_candidate_type={filter_info.get('selected_candidate_type', 'n/a')}",
-                f"selected_is_maneuver={filter_info.get('selected_is_maneuver', 0)}",
-                f"predicted_opposite_lane={filter_info.get('predicted_opposite_lane', 0)}",
-                f"min_corridor_margin={filter_info.get('min_corridor_margin', np.inf):.3f}",
-                f"max_abs_lateral={filter_info.get('max_abs_lateral', 0):.3f}",
-                f"longitudinal_progress={filter_info.get('longitudinal_progress', 0):.3f}",
-                f"pass_obstacle_bonus={filter_info.get('pass_obstacle_bonus', 0):.3f}",
                 f"filter_time_ms={filter_info.get('filter_time_ms', 0):.2f}",
                 f"speed={speed:.3f}",
-                f"crash={info.get('crash', 0)}",
-                f"out_of_road={info.get('out_of_road', 0)}",
-                f"cost={info.get('cost', 0)}",
-                f"is_success={info.get('is_success', 0)}",
+                f"crash={info.get('crash', 0)} cost={info.get('cost', 0)}",
             ]
+
+            if step <= 50 or step % max(args.print_every, 1) == 0:
+                print(" | ".join(lines))
 
             if status_panel_enabled and cv2 is not None:
                 panel = make_status_panel(lines)
@@ -190,18 +215,13 @@ def main():
                 key = cv2.waitKey(1) & 0xFF
                 if key in (ord("q"), ord("Q")):
                     break
-            elif step % max(args.print_every, 1) == 0:
-                print(" | ".join(lines))
 
             if terminated or truncated:
                 _, _ = env.reset()
-                policy = get_current_policy(env)
-                if hasattr(policy, "reset_filter_state"):
-                    policy.reset_filter_state()
-                if hasattr(policy, "expert_takeover"):
-                    policy.expert_takeover = False
-                if hasattr(env.unwrapped.agent, "expert_takeover"):
-                    env.unwrapped.agent.expert_takeover = False
+                filt.reset()
+                policy = attach_filter_to_active_policy(env, filt, args)
+                if not getattr(policy, "_safe_filter_is_patched", False):
+                    raise RuntimeError("Failed to patch active policy after reset.")
 
             if not status_panel_enabled:
                 time.sleep(0.001)
