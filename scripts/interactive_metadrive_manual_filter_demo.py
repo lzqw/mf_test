@@ -42,6 +42,16 @@ def parse_args():
     p.add_argument("--ttc_min", type=float, default=1.5)
     p.add_argument("--h_vo_margin", type=float, default=0.2)
     p.add_argument("--lane_margin_min", type=float, default=0.3)
+
+    p.add_argument("--max_dsteer", type=float, default=0.12)
+    p.add_argument("--max_daccel", type=float, default=0.20)
+    p.add_argument("--allowed_lane_change", type=int, default=1)
+    p.add_argument("--lane_corridor_margin", type=float, default=0.30)
+    p.add_argument("--max_abs_lateral_from_start_lane", type=float, default=5.8)
+    p.add_argument("--vo_activation_distance", type=float, default=12.0)
+    p.add_argument("--ttc_activation_threshold", type=float, default=3.0)
+    p.add_argument("--min_closing_speed", type=float, default=0.5)
+    p.add_argument("--num_maneuver_samples", type=int, default=32)
     p.add_argument("--show_status_panel", action=argparse.BooleanOptionalAction, default=False)
     p.add_argument("--print_every", type=int, default=20)
     return p.parse_args()
@@ -81,6 +91,15 @@ def main():
         ttc_min=args.ttc_min,
         h_vo_margin=args.h_vo_margin,
         lane_margin_min=args.lane_margin_min,
+        max_dsteer=args.max_dsteer,
+        max_daccel=args.max_daccel,
+        allowed_lane_change=args.allowed_lane_change,
+        lane_corridor_margin=args.lane_corridor_margin,
+        max_abs_lateral_from_start_lane=args.max_abs_lateral_from_start_lane,
+        vo_activation_distance=args.vo_activation_distance,
+        ttc_activation_threshold=args.ttc_activation_threshold,
+        min_closing_speed=args.min_closing_speed,
+        num_maneuver_samples=args.num_maneuver_samples,
     )
 
     FilteredManualControlPolicy.configure(

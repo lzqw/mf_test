@@ -11,32 +11,44 @@ import relax.env.drive.lane_change  # noqa: F401
 from relax.safety.metadrive_sample_filter import SampleBasedVehicleSafetyFilter, SampleVehicleFilterConfig
 
 
+def print_case(case_name, raw, exec_action, info):
+    print(f"[{case_name}] raw_action={raw} exec_action={exec_action}")
+    for k in [
+        "selected_candidate_type",
+        "filter_active",
+        "projection_residual",
+        "num_valid_candidates",
+        "valid_candidate_ratio",
+        "fallback",
+        "predicted_opposite_lane",
+        "min_corridor_margin",
+        "max_abs_lateral",
+        "longitudinal_progress",
+        "pass_obstacle_bonus",
+    ]:
+        print(f"    {k}={info.get(k)}")
+
+
 def main():
     cfg = SampleVehicleFilterConfig()
     filt = SampleBasedVehicleSafetyFilter(cfg)
     env = gym.make("FlatThreeLaneStraight", use_render=False, manual_control=False)
+
     obs, info = env.reset(seed=0)
     del obs, info
     filt.reset()
 
-    test_actions = [
-        np.array([0.0, 0.0], dtype=np.float32),
-        np.array([0.0, 0.5], dtype=np.float32),
-        np.array([0.3, 0.5], dtype=np.float32),
-        np.array([-0.3, 0.5], dtype=np.float32),
-        np.array([0.0, -0.5], dtype=np.float32),
-    ]
+    raw_reset = np.array([0.0, 0.0], dtype=np.float32)
+    exec_action, info = filt.project(raw_reset, env=env.unwrapped)
+    print_case("reset", raw_reset, exec_action, info)
 
-    for i, raw in enumerate(test_actions):
-        exec_action, info = filt.project(raw, env=env.unwrapped)
-        print(f"[{i}] raw_action={raw} exec_action={exec_action}")
-        for k in [
-            "selected_candidate_type", "num_valid_candidates", "valid_candidate_ratio", "fallback",
-            "predicted_opposite_lane", "min_corridor_margin", "max_abs_lateral", "min_pred_dist",
-            "min_pred_ttc", "min_pred_h_vo", "longitudinal_progress", "pass_obstacle_bonus"
-        ]:
-            print(f"    {k}={info.get(k)}")
-        env.step(exec_action)
+    # drive forward to create a near-obstacle scenario before evaluating again
+    for _ in range(40):
+        env.step(np.array([0.0, 0.6], dtype=np.float32))
+
+    raw_near = np.array([0.3, 0.5], dtype=np.float32)
+    exec_action, info = filt.project(raw_near, env=env.unwrapped)
+    print_case("near_obstacle", raw_near, exec_action, info)
 
     env.close()
 
