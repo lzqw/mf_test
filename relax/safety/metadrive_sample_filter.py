@@ -169,7 +169,19 @@ class SampleBasedVehicleSafetyFilter:
                         ttc=(d-(self.cfg.ego_radius+self.cfg.obs_radius))/(closing+self.cfg.eps); min_ttc=min(min_ttc,ttc); ttc_active_any=ttc_active_any or (ttc<self.cfg.ttc_activation_threshold)
                         if d<self.cfg.vo_activation_distance:
                             vo_active_any=True; h=abs(p_rel[0]*v_rel[1]-p_rel[1]*v_rel[0])-(self.cfg.ego_radius+self.cfg.obs_radius)*np.linalg.norm(v_rel); min_h=min(min_h,h); min_h_con=min(min_h_con,h)
-            lane_unsafe=predicted_offroad or predicted_opp or min_lane_margin<self.cfg.lane_margin_min or max_abs_lat>self.cfg.max_abs_lateral_from_start_lane
+            if self.cfg.allowed_lane_change > 0:
+                lane_unsafe=(
+                    predicted_offroad
+                    or predicted_opp
+                    or min_corridor_margin<self.cfg.lane_corridor_margin
+                    or max_abs_lat>self.cfg.max_abs_lateral_from_start_lane
+                )
+            else:
+                lane_unsafe=(
+                    predicted_offroad
+                    or predicted_opp
+                    or min_lane_margin<self.cfg.lane_margin_min
+                )
             collision=min_d<self.cfg.safe_radius; ttc_unsafe=ttc_active_any and (min_ttc<self.cfg.ttc_min); vo_unsafe=vo_active_any and (min_h_con<(self.cfg.h_vo_margin-self.cfg.h_vo_tolerance))
             valid=not(collision or ttc_unsafe or vo_unsafe or lane_unsafe or (self.cfg.forbid_opposite_lane and predicted_opp))
             end=np.array([x,y]); start=np.array([ego['x'],ego['y']]); longitudinal_progress=float(np.dot(end-start,corridor['heading_ref']))
@@ -180,7 +192,22 @@ class SampleBasedVehicleSafetyFilter:
             risk=(1000*float(collision)+1000*float(predicted_opp)+1000*float(predicted_offroad)+500*float(lane_unsafe)+50*max(0,self.cfg.ttc_min-(min_ttc if np.isfinite(min_ttc) else self.cfg.ttc_min))+20*max(0,self.cfg.h_vo_margin-(min_h_con if np.isfinite(min_h_con) else self.cfg.h_vo_margin))+10*max(0,self.cfg.safe_radius-min_d)-0.2*longitudinal_progress)
             return dict(valid=valid,score=score,risk=risk,seq=seq,first=first,last=seq[-1],type=c['type'],is_maneuver=c['is_maneuver'],predicted_opposite_lane=predicted_opp,predicted_offroad=predicted_offroad,lane_safe=not lane_unsafe,min_corridor_margin=min_corridor_margin,max_abs_lateral=max_abs_lat,min_d=min_d,min_ttc=min_ttc,min_h=min_h_con if vo_active_any else np.inf,lane_margin=min_lane_margin,collision=collision,ttc_unsafe=ttc_unsafe,vo_unsafe=vo_unsafe,lane_unsafe=lane_unsafe,longitudinal_progress=longitudinal_progress,pass_obstacle_bonus=pass_bonus)
 
-        evals=[eval_candidate(c) for c in candidates]; valids=[e for e in evals if e['valid']]; fallback=len(valids)==0
-        best=min(valids,key=lambda e:e['score']) if valids else min(evals,key=lambda e:e['risk'])
+        raw_seq=self._rate_limit_sequence(self._as_sequence(raw),prev)
+        raw_eval=eval_candidate(dict(type='raw',is_maneuver=False,seq=raw_seq))
+
+        evals=[eval_candidate(c) for c in candidates]; valids=[e for e in evals if e['valid']]
+        near_term_risk=(
+            raw_eval['collision']
+            or raw_eval['ttc_unsafe']
+            or raw_eval['vo_unsafe']
+            or raw_eval['lane_unsafe']
+            or raw_eval['predicted_opposite_lane']
+        )
+        if raw_eval['valid'] and not near_term_risk:
+            best=raw_eval
+            fallback=False
+        else:
+            fallback=len(valids)==0
+            best=min(valids,key=lambda e:e['score']) if valids else min(evals,key=lambda e:e['risk'])
         exec_action=np.clip(best['first'],-1.0,1.0).astype(np.float32); self.prev_exec_action=exec_action.copy(); diff=exec_action-raw
         return exec_action, dict(raw_action=raw,exec_action=exec_action,projection_residual=float(np.linalg.norm(diff)),projection_cost=float(np.sum(diff**2)),filter_active=float(np.linalg.norm(diff)>1e-6),sample_filter_active=1.0,num_candidates=len(candidates),num_valid_candidates=len(valids),valid_candidate_ratio=float(len(valids)/max(len(candidates),1)),fallback=float(fallback),no_safe_candidate=float(fallback),least_risk_score=float(best['risk']),min_pred_dist=float(best['min_d']),min_pred_ttc=float(best['min_ttc']),min_pred_h_vo=float(best['min_h']),min_lane_margin=float(best['lane_margin']),predicted_collision=float(best['collision']),predicted_offroad=float(best['predicted_offroad']),predicted_opposite_lane=float(best['predicted_opposite_lane']),lane_safe=float(best['lane_safe']),min_corridor_margin=float(best['min_corridor_margin']),max_abs_lateral=float(best['max_abs_lateral']),longitudinal_progress=float(best['longitudinal_progress']),pass_obstacle_bonus=float(best['pass_obstacle_bonus']),selected_candidate_type=best['type'],selected_is_maneuver=float(best['is_maneuver']),chosen_sequence_first_action=np.asarray(best['first'],dtype=np.float32),chosen_sequence_last_action=np.asarray(best['last'],dtype=np.float32),filter_time_ms=float((time.perf_counter()-t0)*1000.0))
