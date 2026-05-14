@@ -195,6 +195,7 @@ class SafeHumanoidBenchWrapper(gym.Wrapper):
             target_low = np.asarray(task.target_low, dtype=np.float32)
             target_high = np.asarray(task.target_high, dtype=np.float32)
             hand_pos = np.asarray(self.env.unwrapped.robot.left_hand_position(), dtype=np.float32)
+            raw_action_before_reference = raw_action.copy()
             action_for_filter = raw_action
             ref_info = {}
 
@@ -211,11 +212,17 @@ class SafeHumanoidBenchWrapper(gym.Wrapper):
             )
 
             filter_info.update(ref_info)
-            filter_info["raw_action_before_reference"] = raw_action
+            filter_info["raw_action_before_reference"] = raw_action_before_reference
             filter_info["action_for_filter"] = action_for_filter
 
-            filter_info["total_projection_residual"] = float(np.linalg.norm(filter_info["exec_action"] - raw_action))
-            filter_info["total_projection_cost"] = float(np.sum((filter_info["exec_action"] - raw_action) ** 2))
+            total_projection = exec_action - raw_action_before_reference
+            filter_info["total_projection_residual"] = float(np.linalg.norm(total_projection))
+            filter_info["total_projection_cost"] = float(np.sum(total_projection ** 2))
+
+            filter_info["target_filter_projection_residual"] = float(filter_info.get("projection_residual", 0.0))
+            if self.reference_filter_mode == "goal":
+                filter_info["projection_residual"] = filter_info["total_projection_residual"]
+                filter_info["projection_cost"] = filter_info["total_projection_cost"]
 
             if float(filter_info.get("reference_correction_active", 0.0)) > 0:
                 filter_info["filter_active"] = 1.0
