@@ -31,6 +31,10 @@ class MPCVehicleCBFConfig:
     solver_max_iter: int = 100
     solver_print_level: int = 0
     warm_start: bool = True
+    preserve_raw_accel: bool = True
+    disable_mpc_brake: bool = True
+    min_forward_accel_when_mpc_active: float = 0.0
+    mpc_failed_keep_raw_accel: bool = True
 
 
 class MPCVehicleCBFSafetyFilter:
@@ -195,6 +199,7 @@ class MPCVehicleCBFSafetyFilter:
         ego, ego_obj = self._extract_ego_state(env)
         obs = self._extract_obstacles(env, ego_obj, ego[:2])
         ref = self._extract_lane_reference(env, ego)
+        mpc_accel_cmd = float(raw[1])
         if obs is None:
             exec_action = self._box_rate(raw, prev)
             info = dict(selected_candidate_type="raw", filter_active=0.0, mpc_success=1.0, mpc_status="no_obstacle")
@@ -216,22 +221,37 @@ class MPCVehicleCBFSafetyFilter:
                 ok, status, steer, alpha_min = self._mpc_solve(ref, ego, pts, raw_eval["vox"], raw_eval["voy"], ego[3], raw_eval["sign_s"], cbf_active)
                 if ok:
                     nsteer = np.clip(steer / max(self.cfg.max_steer_angle, 1e-6) * self.cfg.steer_limit, -self.cfg.steer_limit, self.cfg.steer_limit)
-                    if raw_eval["predicted_collision"] > 0.5 or raw_eval["min_ttc"] < 1.0:
-                        accel = self.cfg.fallback_brake
-                    elif raw_eval["cbf_violation"] > 0.5:
-                        accel = min(float(raw[1]), 0.2)
-                    else:
+                    if self.cfg.preserve_raw_accel:
                         accel = float(raw[1])
-                    exec_action = self._box_rate(np.array([nsteer, accel], dtype=np.float32), prev)
+                        if self.cfg.min_forward_accel_when_mpc_active > 0.0 and accel > 0.0:
+                            accel = max(accel, self.cfg.min_forward_accel_when_mpc_active)
+                    elif self.cfg.disable_mpc_brake:
+                        accel = max(float(raw[1]), 0.0)
+                    else:
+                        if raw_eval["predicted_collision"] > 0.5 or raw_eval["min_ttc"] < 1.0:
+                            accel = self.cfg.fallback_brake
+                        elif raw_eval["cbf_violation"] > 0.5:
+                            accel = min(float(raw[1]), 0.2)
+                        else:
+                            accel = float(raw[1])
+                    mpc_accel_cmd = float(accel)
+                    exec_action = self._box_rate([nsteer, accel], prev)
                     info = dict(selected_candidate_type="mpc_cbf", filter_active=1.0, mpc_success=1.0, mpc_status=status, mpc_steer=float(nsteer), mpc_alpha_min=float(alpha_min), fallback=0.0, no_safe_candidate=0.0)
                 else:
                     steer_fb = np.clip(0.2 * np.sin(ref[2] - ego[2]), -self.cfg.steer_limit, self.cfg.steer_limit)
-                    exec_action = self._box_rate(np.array([steer_fb, self.cfg.fallback_brake], dtype=np.float32), prev)
-                    info = dict(selected_candidate_type="mpc_failed_brake", filter_active=1.0, mpc_success=0.0, mpc_status=status, mpc_steer=float(steer_fb), mpc_alpha_min=0.0, fallback=1.0, no_safe_candidate=1.0)
+                    if self.cfg.mpc_failed_keep_raw_accel or self.cfg.disable_mpc_brake:
+                        accel_fb = float(raw[1])
+                    else:
+                        accel_fb = self.cfg.fallback_brake
+                    mpc_accel_cmd = float(accel_fb)
+                    exec_action = self._box_rate([steer_fb, accel_fb], prev)
+                    selected_candidate_type = "mpc_failed_steer_only" if (self.cfg.mpc_failed_keep_raw_accel or self.cfg.disable_mpc_brake) else "mpc_failed_brake"
+                    info = dict(selected_candidate_type=selected_candidate_type, filter_active=1.0, mpc_success=0.0, mpc_status=status, mpc_steer=float(steer_fb), mpc_alpha_min=0.0, fallback=1.0, no_safe_candidate=1.0)
             info.update(raw_eval)
         self.prev_exec_action = np.asarray(exec_action, dtype=np.float32).copy()
         diff = exec_action - raw
         min_ttc = float(info.get("min_ttc", np.inf))
         info["filter_active"] = float(np.linalg.norm(diff) > 1e-6)
-        info.update(dict(raw_action=raw, exec_action=exec_action, projection_residual=float(np.linalg.norm(diff)), projection_cost=float(np.sum(diff ** 2)), sample_filter_active=0.0, mpc_cbf_active=1.0, num_candidates=1, num_valid_candidates=1 if info.get("selected_candidate_type") == "raw" else 0, valid_candidate_ratio=float(1.0 if info.get("selected_candidate_type") == "raw" else 0.0), fallback=float(info.get("fallback", 0.0)), no_safe_candidate=float(info.get("no_safe_candidate", 0.0)), min_pred_dist=float(info.get("min_dist", np.inf)), min_pred_ttc=min_ttc, min_pred_h_cbf=float(info.get("h_min", np.inf)), min_pred_cbf=float(info.get("cbf_min", np.inf)), cbf_violation=float(info.get("cbf_violation", 0.0)), predicted_collision=float(info.get("predicted_collision", 0.0)), mpc_steer=float(info.get("mpc_steer", 0.0)), mpc_alpha_min=float(info.get("mpc_alpha_min", 1.0)), sign_s=float(info.get("sign_s", 1.0)), min_pred_h_vo=float(info.get("h_min", np.inf)), vo_violation=float(info.get("cbf_violation", 0.0)), ttc_violation=float(min_ttc < self.cfg.ttc_activation_threshold), lane_violation=float(1.0 if info.get("selected_candidate_type") == "mpc_failed_brake" else 0.0), filter_time_ms=float((time.perf_counter() - t0) * 1000.0)))
+        raw_accel_preserved = float(abs(float(mpc_accel_cmd) - float(raw[1])) < 1e-6)
+        info.update(dict(raw_action=raw, exec_action=exec_action, projection_residual=float(np.linalg.norm(diff)), projection_cost=float(np.sum(diff ** 2)), sample_filter_active=0.0, mpc_cbf_active=1.0, num_candidates=1, num_valid_candidates=1 if info.get("selected_candidate_type") == "raw" else 0, valid_candidate_ratio=float(1.0 if info.get("selected_candidate_type") == "raw" else 0.0), fallback=float(info.get("fallback", 0.0)), no_safe_candidate=float(info.get("no_safe_candidate", 0.0)), min_pred_dist=float(info.get("min_dist", np.inf)), min_pred_ttc=min_ttc, min_pred_h_cbf=float(info.get("h_min", np.inf)), min_pred_cbf=float(info.get("cbf_min", np.inf)), cbf_violation=float(info.get("cbf_violation", 0.0)), predicted_collision=float(info.get("predicted_collision", 0.0)), mpc_steer=float(info.get("mpc_steer", 0.0)), mpc_alpha_min=float(info.get("mpc_alpha_min", 1.0)), sign_s=float(info.get("sign_s", 1.0)), min_pred_h_vo=float(info.get("h_min", np.inf)), vo_violation=float(info.get("cbf_violation", 0.0)), ttc_violation=float(min_ttc < self.cfg.ttc_activation_threshold), lane_violation=0.0, preserve_raw_accel=float(self.cfg.preserve_raw_accel), disable_mpc_brake=float(self.cfg.disable_mpc_brake), raw_accel_preserved=raw_accel_preserved, accel_modified_by_mpc=float(1.0 - raw_accel_preserved), mpc_accel_cmd=float(mpc_accel_cmd), filter_time_ms=float((time.perf_counter() - t0) * 1000.0)))
         return exec_action, info
