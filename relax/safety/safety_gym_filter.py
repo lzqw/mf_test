@@ -381,7 +381,7 @@ class SafetyGymHardFilter:
             return []
         u = getattr(env, "unwrapped", env)
         objs = []
-        for src in ["task.objects", "task.object", "task.box", "task.boxes", "task.push_object", "task.obj", "objects", "world.objects"]:
+        for src in ["task.push_box", "task.objects", "task.object", "task.box", "task.boxes", "task.push_object", "task.obj", "objects", "world.objects"]:
             coll = _get_attr_path(u, src)
             if coll is None:
                 continue

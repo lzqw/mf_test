@@ -20,6 +20,7 @@ from envs.safety_gym_safe_wrapper import SafeSafetyGymWrapper
 from relax.algorithm.safe_pullback_rf2_sac_ent_safetygym import SafePullbackRF2SACENTSafetyGym
 from relax.network.safe_pullback_rf2_sac_ent import create_safe_pullback_rf2_sac_ent_net
 from scripts.safe_pullback_experience import SafePullbackExperience
+from scripts.safetygym_eval_viz import collect_scene, plot_safetygym_eval_diagnostics, plot_safetygym_eval_trajectory, save_records
 
 class Batch(NamedTuple):
     obs:jnp.ndarray; raw_action:jnp.ndarray; action:jnp.ndarray; reward:jnp.ndarray; done:jnp.ndarray; next_obs:jnp.ndarray; projection_residual:jnp.ndarray; projection_cost:jnp.ndarray
@@ -151,6 +152,41 @@ def eval_agent(agent, args, env):
     out['safety_score']=out['cost_return']+10.0*out['safety_violation_rate']+out['FAR']+0.1*out['APR']
     return out
 
+
+def rollout_eval_trajectories(agent, args, env, save_dir, step):
+    out_dir = Path(save_dir) if save_dir else Path(args.log_dir) / "eval_trajectories" / f"step_{step}"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    safe_filter = getattr(env, "safe_filter", None)
+    for ep in range(args.eval_traj_episodes):
+        obs, _ = env.reset(seed=args.seed + 2000 + step + ep)
+        scene = collect_scene(env, safe_filter) if safe_filter is not None else {"hazards": [], "objects": [], "goal": None}
+        records = []
+        done = False
+        l = 0
+        ret = 0.0
+        costs = []
+        fars = []
+        aprs = []
+        info = {}
+        while not done and l < 1000:
+            raw = np.asarray(agent.get_action(jax.random.PRNGKey(args.seed + step * 10000 + ep * 1000 + l), obs[None])[0])
+            obs, reward, term, trunc, info = env.step(raw)
+            done = term or trunc
+            exec_action = np.asarray(info.get("exec_action", raw), dtype=np.float32)
+            ego = safe_filter._extract_ego_state_from_env(env) if safe_filter is not None else {"pos": np.zeros(2, np.float32)}
+            records.append({"t": l, "ego_x": float(ego["pos"][0]), "ego_y": float(ego["pos"][1]), "raw_action": raw, "exec_action": exec_action, "reward": float(reward), "cost": safe_info_float(info, "cost", 0.0), "filter_active": safe_info_float(info, "filter_active", 0.0), "projection_residual": safe_info_float(info, "projection_residual", 0.0), "raw_action_norm": safe_info_float(info, "raw_action_norm", 0.0), "exec_action_norm": safe_info_float(info, "exec_action_norm", 0.0), "current_min_h": safe_info_float(info, "current_min_h", np.nan), "predicted_min_h": safe_info_float(info, "predicted_min_h", np.nan), "emergency_active": safe_info_float(info, "emergency_active", 0.0), "safe_candidate_ratio": safe_info_float(info, "safe_candidate_ratio", np.nan)})
+            l += 1
+            ret += float(reward)
+            costs.append(safe_info_float(info, "cost", 0.0)); fars.append(safe_info_float(info, "filter_active", 0.0)); aprs.append(safe_info_float(info, "projection_residual", 0.0))
+        succ = safe_info_float(info, "is_success", safe_info_float(info, "success", safe_info_float(info, "goal_met", safe_info_float(info, "task_success", 0.0))))
+        summary = dict(return_=ret, cost_return=float(np.sum(costs)), FAR=float(np.mean(fars)) if fars else 0.0, APR=float(np.mean(aprs)) if aprs else 0.0, success=succ)
+        prefix = out_dir / f"ep{ep:03d}"
+        save_records(records, prefix)
+        title = f"{args.env_id} ep={ep} return={summary['return_']:.2f} cost={summary['cost_return']:.2f} FAR={summary['FAR']:.3f} APR={summary['APR']:.3f} success={summary['success']:.2f}"
+        plot_safetygym_eval_trajectory(records, scene, save_path=str(prefix) + "_trajectory.png", title=title, arrow_stride=args.eval_traj_stride)
+        plot_safetygym_eval_diagnostics(records, save_path=str(prefix) + "_diagnostics.png", title=title)
+    return out_dir
+
 if __name__=='__main__':
     p=argparse.ArgumentParser();
     for k,d,t in [('env_id','SafetyPointGoal1-v0',str),('seed',0,int),('total_steps',50000,int),('start_steps',1000,int),('update_after',1000,int),('batch_size',256,int),('eval_interval',1000,int),('eval_episodes',3,int),('log_dir',None,str)]: p.add_argument(f'--{k}',default=d,type=t,required=(k=='log_dir'))
@@ -160,6 +196,10 @@ if __name__=='__main__':
     p.add_argument('--save_partial_on_eval',action='store_true',default=True)
     p.add_argument('--plot_train_window',type=int,default=100)
     p.add_argument('--use_tn_energy',action='store_true'); p.add_argument('--use_projection_critic',action='store_true'); p.add_argument('--lambda_p',type=float,default=0.03); p.add_argument('--lambda_p_warmup_steps',type=int,default=0); p.add_argument('--entropy_reg_mode',default='flac_tn'); p.add_argument('--sample_k',type=int,default=256); p.add_argument('--diffusion_steps',type=int,default=10); p.add_argument('--num_ent_timesteps',type=int,default=10); p.add_argument('--policy_noise_scale',type=float,default=0.3); p.add_argument('--use_directional_noise',action='store_true'); p.add_argument('--fixed_alpha',action='store_true'); p.add_argument('--alpha_value',type=float,default=0.1); p.add_argument('--init_alpha',type=float,default=0.1); p.add_argument('--lr',type=float,default=3e-4); p.add_argument('--alpha_lr',type=float,default=1e-2); p.add_argument('--gamma',type=float,default=0.99); p.add_argument('--gamma_p',type=float,default=0.99); p.add_argument('--use_filter_surrogate',action='store_true'); p.add_argument('--surrogate_warmup_steps',type=int,default=0); p.add_argument('--surrogate_loss_coef',type=float,default=1.0); p.add_argument('--lambda_raw_norm',type=float,default=0.0)
+    p.add_argument('--save_eval_trajectories', action='store_true')
+    p.add_argument('--eval_traj_episodes', type=int, default=1)
+    p.add_argument('--eval_traj_stride', type=int, default=25)
+    p.add_argument('--eval_traj_dir', type=str, default=None)
     args=p.parse_args(); np.random.seed(args.seed)
     if args.save_curve_interval < 0:
         args.save_curve_interval = 0
@@ -217,6 +257,12 @@ if __name__=='__main__':
                 out=agent.update(jax.random.PRNGKey(args.seed+step),sample_batch(buf,args.batch_size)); out['step']=step; train.append(out)
             if step%args.eval_interval==0:
                 m=eval_agent(agent,args,eenv); m['step']=step; ev.append(m)
+                if args.save_eval_trajectories:
+                    try:
+                        traj_dir = rollout_eval_trajectories(agent, args, eenv, args.eval_traj_dir, step)
+                        print(f"[eval traj] saved to {traj_dir}")
+                    except Exception as e:
+                        print(f"[eval traj][warning] failed at step {step}: {e}")
                 with open(log/'checkpoints'/f'checkpoint_step_{step}.pkl','wb') as f: pickle.dump(agent.state,f)
                 if np.isfinite(m['return_']) and m['return_']>best['return_'][0]: best['return_']=(m['return_'],'best_return_checkpoint.pkl',max); pickle.dump(agent.state,open(log/'best_return_checkpoint.pkl','wb'))
                 if np.isfinite(m['cost_return']) and m['cost_return']<best['cost_return'][0]: best['cost_return']=(m['cost_return'],'best_cost_checkpoint.pkl',min); pickle.dump(agent.state,open(log/'best_cost_checkpoint.pkl','wb'))
