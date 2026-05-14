@@ -43,6 +43,7 @@ class SafePullbackRF2SACENTNet:
     noise_schedule: str
     alpha_value: float
     fixed_alpha: bool
+    use_directional_noise: bool
 
     @property
     def flow(self):
@@ -63,7 +64,7 @@ class SafePullbackRF2SACENTNet:
 
 
     def directional_noise(self, key, obs, base_std, return_components=False):
-        if self.act_dim != 2 or obs.shape[-1] < 8:
+        if (not self.use_directional_noise) or self.act_dim != 2 or obs.shape[-1] < 8:
             noise = base_std * jax.random.normal(key, (*obs.shape[:-1], self.act_dim))
             if return_components:
                 zero = jnp.zeros_like(noise)
@@ -174,6 +175,7 @@ def create_safe_pullback_rf2_sac_ent_net(
     alpha_value=0.01,
     fixed_alpha=True,
     init_alpha=0.01,
+    use_directional_noise=True,
 ):
     q = hk.without_apply_rng(hk.transform(lambda obs, act: QNet(hidden_sizes, activation)(obs, act)))
     qp = hk.without_apply_rng(hk.transform(lambda obs, act: QNet(hidden_sizes, activation)(obs, act)))
@@ -200,5 +202,6 @@ def create_safe_pullback_rf2_sac_ent_net(
                                    num_timesteps_test=num_timesteps_test, act_dim=act_dim,
                                    target_entropy=-act_dim * target_entropy_scale, num_particles=num_particles,
                                    noise_scale=noise_scale, noise_schedule='linear',
-                                   alpha_value=alpha_value, fixed_alpha=fixed_alpha)
+                                   alpha_value=alpha_value, fixed_alpha=fixed_alpha,
+                                   use_directional_noise=use_directional_noise)
     return net, params
