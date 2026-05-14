@@ -1,5 +1,22 @@
 #!/usr/bin/env bash
 set -euo pipefail
+
+# 4090 单卡建议环境变量:
+# export CUDA_VISIBLE_DEVICES=0
+# export XLA_PYTHON_CLIENT_PREALLOCATE=false
+# export XLA_PYTHON_CLIENT_MEM_FRACTION=0.70
+# export MUJOCO_GL=egl
+#
+# smoke test:
+# python scripts/smoke_test_safetygym.py --episodes 1 --use_filter --filter_type hybrid
+#
+# 5k debug:
+# python scripts/train_safe_safetygym.py \
+#   --env_id SafetyPointGoal1-v0 --seed 0 --total_steps 5000 --start_steps 1000 \
+#   --update_after 1000 --eval_interval 1000 --eval_episodes 3 --batch_size 256 \
+#   --log_dir logs/safetygym_debug/point_goal_ours_seed0 \
+#   --use_filter --filter_type hybrid --use_tn_energy --use_projection_critic \
+#   --lambda_p 0.03 --entropy_reg_mode flac_tn
 ENV_ID=$1
 TOTAL_STEPS=${2:-50000}
 SEED=${3:-0}

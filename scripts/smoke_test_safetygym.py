@@ -34,10 +34,14 @@ def test_env(env_id, episodes, use_filter, filter_type, render_mode):
         obs, info = env.reset()
         for i in range(5):
             out = env.step(env.action_space.sample())
-            if len(out) != 6:
-                print(f"[FAIL API] expected 6 returns got {len(out)}")
+            if len(out) not in (5, 6):
+                print(f"[FAIL API] expected 5/6 returns got {len(out)}")
                 return False
-            obs, reward, cost, term, trunc, info = out
+            if len(out) == 6:
+                obs, reward, cost, term, trunc, info = out
+            else:
+                obs, reward, term, trunc, info = out
+                cost = float(info.get("cost", 0.0))
             if term or trunc:
                 break
 
