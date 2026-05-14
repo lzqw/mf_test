@@ -35,14 +35,23 @@ def safe_nanmean(xs):
     finite=arr[np.isfinite(arr)]
     return float(np.mean(finite)) if finite.size else np.nan
 
+def safe_info_float(info, key, default=0.0):
+    v = info.get(key, default)
+    if isinstance(v, (str, bytes)):
+        return float(default)
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return float(default)
+
 def eval_agent(agent, args, env):
     ms=[]
     for ep in range(args.eval_episodes):
         obs,_=env.reset(seed=args.seed+1000+ep); done=False; ret=0; l=0; costs=[]; fars=[]; aprs=[]; rns=[]; ens=[]; mins=[]; cbfs=[]; sv=[]; cv=[]; sc_ratio=[]; emergency=[]; gh=[]; fh=[]; lh=[]; rh=[]; info={}
         while not done and l<1000:
             a=np.asarray(agent.get_action(jax.random.PRNGKey(args.seed+ep*10000+l),obs[None])[0]); obs,r,t,tr,info=env.step(a); done=t or tr; ret+=float(r); l+=1
-            costs.append(float(info.get('cost',0))); fars.append(float(info.get('filter_active',0))); aprs.append(float(info.get('projection_residual',0))); rns.append(float(info.get('raw_action_norm',0))); ens.append(float(info.get('exec_action_norm',0))); mins.append(float(info.get('min_h',np.nan))); cbfs.append(float(info.get('cbf_violation',0))); sv.append(float(info.get('safety_violation',0))); cv.append(float(info.get('constraint_violation',0))); sc_ratio.append(float(info.get('safe_candidate_ratio',0.0))); emergency.append(float(info.get('emergency_active',0.0))); gh.append(float(info.get('global_min_h',np.nan))); fh.append(float(info.get('front_h',np.nan))); lh.append(float(info.get('left_h',np.nan))); rh.append(float(info.get('right_h',np.nan)))
-        success=float(info.get('is_success', info.get('success', info.get('goal_met', info.get('task_success', 0.0)))))
+            costs.append(safe_info_float(info, 'cost', 0)); fars.append(safe_info_float(info, 'filter_active', 0)); aprs.append(safe_info_float(info, 'projection_residual', 0)); rns.append(safe_info_float(info, 'raw_action_norm', 0)); ens.append(safe_info_float(info, 'exec_action_norm', 0)); mins.append(safe_info_float(info, 'min_h', np.nan)); cbfs.append(safe_info_float(info, 'cbf_violation', 0)); sv.append(safe_info_float(info, 'safety_violation', 0)); cv.append(safe_info_float(info, 'constraint_violation', 0)); sc_ratio.append(safe_info_float(info, 'safe_candidate_ratio', 0.0)); emergency.append(safe_info_float(info, 'emergency_active', 0.0)); gh.append(safe_info_float(info, 'global_min_h', np.nan)); fh.append(safe_info_float(info, 'front_h', np.nan)); lh.append(safe_info_float(info, 'left_h', np.nan)); rh.append(safe_info_float(info, 'right_h', np.nan))
+        success=safe_info_float(info, 'is_success', safe_info_float(info, 'success', safe_info_float(info, 'goal_met', safe_info_float(info, 'task_success', 0.0))))
         ms.append(dict(return_=ret, episode_length=l, success_rate=success, cost_return=float(np.sum(costs)), cost_rate=float(np.mean(np.array(costs)>0)) if costs else 0.0, safety_violation_rate=float(np.mean(sv)) if sv else 0.0, constraint_violation_rate=float(np.mean(cv)) if cv else 0.0, FAR=float(np.mean(fars)) if fars else 0.0, APR=float(np.mean(aprs)) if aprs else 0.0, projection_cost=float(np.mean(np.square(aprs))) if aprs else 0.0, raw_action_norm=float(np.mean(rns)) if rns else 0.0, exec_action_norm=float(np.mean(ens)) if ens else 0.0, min_h=safe_nanmean(mins) if mins else np.nan, cbf_violation_rate=float(np.mean(cbfs)) if cbfs else 0.0, safe_candidate_ratio=float(np.mean(sc_ratio)) if sc_ratio else 0.0, emergency_rate=float(np.mean(emergency)) if emergency else 0.0, global_min_h=safe_nanmean(gh) if gh else np.nan, front_h=safe_nanmean(fh) if fh else np.nan, left_h=safe_nanmean(lh) if lh else np.nan, right_h=safe_nanmean(rh) if rh else np.nan))
     out={k:safe_nanmean([m[k] for m in ms]) for k in ms[0].keys()}
     out['safety_score']=out['cost_return']+10.0*out['safety_violation_rate']+out['FAR']+0.1*out['APR']
@@ -71,8 +80,16 @@ if __name__=='__main__':
         buf=buf[-1_000_000:]
         obs=next_obs
         if term or trunc: obs,_=env.reset()
-        for k,v in info.items():
-            if np.isscalar(v) and np.isfinite(float(v)): writer.add_scalar(f'train_env_info/{k}',float(v),step)
+        for k, v in info.items():
+            try:
+                if isinstance(v, (str, bytes)):
+                    continue
+                if np.isscalar(v):
+                    fv = float(v)
+                    if np.isfinite(fv):
+                        writer.add_scalar(f'train_env_info/{k}', fv, step)
+            except (TypeError, ValueError):
+                continue
         if step>=args.update_after and len(buf)>=args.batch_size:
             out=agent.update(jax.random.PRNGKey(args.seed+step),sample_batch(buf,args.batch_size)); out['step']=step; train.append(out)
         if step%args.eval_interval==0:
