@@ -360,7 +360,7 @@ class SafePullbackRF2SACENTMetaDrive(Algorithm):
             t_pol = optax.incremental_update(npol, p.target_policy, self.tau)
 
             ns = SafePullbackRF2TrainState(
-                params=SafePullbackRF2Params(nq1, nq2, t_q1, t_q2, nqp, nvp, t_vp, npol, t_pol, nloga),
+                params=SafePullbackRF2Params(nq1, nq2, t_q1, t_q2, nqp, nvp, t_vp, npol, t_pol, p.g, nloga),
                 opt_state=SafePullbackRF2OptStates(oq1, oq2, oqp, ovp, opol, ologa),
                 step=state.step + 1,
                 entropy=jnp.mean(entropy),
