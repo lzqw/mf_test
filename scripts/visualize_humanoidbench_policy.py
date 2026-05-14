@@ -71,7 +71,13 @@ def main():
     blocked_hands = getattr(train_args, "blocked_hands", None)
     small_obs = getattr(train_args, "small_obs", None)
     augment_reach_obs = getattr(train_args, "augment_reach_obs", False)
+    reference_filter_mode = getattr(train_args, "reference_filter_mode", "none")
+    reference_filter_threshold = getattr(train_args, "reference_filter_threshold", 0.25)
+    reference_filter_type = getattr(train_args, "reference_filter_type", "replace")
 
+    print("reference_filter_mode:", reference_filter_mode)
+    print("reference_filter_threshold:", reference_filter_threshold)
+    print("reference_filter_type:", reference_filter_type)
     env = SafeHumanoidBenchWrapper(
         train_args.env_name,
         use_filter=(not args.no_filter),
@@ -90,6 +96,9 @@ def main():
         var_path=getattr(train_args, "var_path", None),
         policy_type=getattr(train_args, "policy_type", None),
         augment_reach_obs=augment_reach_obs,
+        reference_filter_mode=reference_filter_mode,
+        reference_filter_threshold=reference_filter_threshold,
+        reference_filter_type=reference_filter_type,
         blocked_hands=blocked_hands,
         small_obs=small_obs,
     )
@@ -151,6 +160,9 @@ def main():
                     f"APR={np.mean(apr):.4f}, "
                     f"fall={np.max(falls):.0f}"
                 )
+                msg += f", reference_correction_active={float(info.get('reference_correction_active', 0.0)):.1f}"
+                msg += f", raw_to_reference_dist={float(info.get('raw_to_reference_dist', np.nan)):.3f}"
+                msg += f", total_projection_residual={float(info.get('total_projection_residual', info.get('projection_residual', 0.0))):.3f}"
                 if hand_dists:
                     msg += f", hand_dist={hand_dists[-1]:.3f}"
                 if target_dists:
@@ -168,7 +180,10 @@ def main():
             f"FAR={np.mean(far):.3f}, "
             f"APR={np.mean(apr):.4f}, "
             f"fall={np.max(falls):.0f}, "
-            f"success={float(info.get('is_success', 0.0)):.3f}"
+            f"success={float(info.get('is_success', 0.0)):.3f}, "
+            f"reference_correction_active={float(info.get('reference_correction_active', 0.0)):.1f}, "
+            f"raw_to_reference_dist={float(info.get('raw_to_reference_dist', np.nan)):.3f}, "
+            f"total_projection_residual={float(info.get('total_projection_residual', info.get('projection_residual', 0.0))):.3f}"
         )
         if hand_dists:
             print(f"final hand_dist={hand_dists[-1]:.3f}")
