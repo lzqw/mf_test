@@ -26,6 +26,11 @@ class CBFBuiltinFilterConfig:
     ttc_front_max_longitudinal: float = 30.0
     cbf_h_margin: float = 0.0
     cbf_min_margin: float = 0.0
+    enable_cbf_lateral_gate: bool = True
+    cbf_lateral_gate: float = 2.0
+    cbf_front_min_longitudinal: float = -1.0
+    cbf_front_max_longitudinal: float = 30.0
+    cbf_close_distance_margin: float = 0.3
     require_approaching: bool = True
     builtin_policy_name: str = "idm"
     builtin_action_scale: float = 1.0
@@ -231,6 +236,9 @@ class CBFBuiltinSafetyFilter:
         in_ttc_corridor = (obstacle_longitudinal >= self.cfg.ttc_front_min_longitudinal and obstacle_longitudinal <= self.cfg.ttc_front_max_longitudinal and abs(obstacle_lateral) <= self.cfg.ttc_lateral_gate)
         if not self.cfg.enable_ttc_lateral_gate:
             in_ttc_corridor = True
+        in_cbf_corridor = (obstacle_longitudinal >= self.cfg.cbf_front_min_longitudinal and obstacle_longitudinal <= self.cfg.cbf_front_max_longitudinal and abs(obstacle_lateral) <= self.cfg.cbf_lateral_gate)
+        if not self.cfg.enable_cbf_lateral_gate:
+            in_cbf_corridor = True
         evx0, evy0 = v * np.cos(yaw) - vox, v * np.sin(yaw) - voy
         sign_s = 1.0 if ex0 * evy0 - ey0 * evx0 > 0 else -1.0
         min_d = min_ttc = h_min = cbf_min = np.inf
@@ -259,7 +267,9 @@ class CBFBuiltinSafetyFilter:
                 x += dt * v * np.cos(yaw)
                 y += dt * v * np.sin(yaw)
         cbf_min = float(cbf_min if np.isfinite(cbf_min) else h_min)
-        return dict(min_dist=float(min_d), min_ttc=float(min_ttc), h_min=float(h_min), cbf_min=cbf_min, predicted_collision=pred_col, cbf_violation=float((h_min < self.cfg.cbf_h_margin) or (cbf_min < self.cfg.cbf_min_margin)), closing_speed=float(closing_speed), obstacle_longitudinal=float(obstacle_longitudinal), obstacle_lateral=float(obstacle_lateral), in_ttc_corridor=float(in_ttc_corridor), ttc_lateral_gate=float(self.cfg.ttc_lateral_gate), ttc_front_min_longitudinal=float(self.cfg.ttc_front_min_longitudinal), ttc_front_max_longitudinal=float(self.cfg.ttc_front_max_longitudinal))
+        close_distance_relevant = float(min_d <= (R + self.cfg.cbf_close_distance_margin))
+        cbf_relevant = float(in_cbf_corridor or close_distance_relevant)
+        return dict(min_dist=float(min_d), min_ttc=float(min_ttc), h_min=float(h_min), cbf_min=cbf_min, predicted_collision=pred_col, cbf_violation=float((h_min < self.cfg.cbf_h_margin) or (cbf_min < self.cfg.cbf_min_margin)), closing_speed=float(closing_speed), obstacle_longitudinal=float(obstacle_longitudinal), obstacle_lateral=float(obstacle_lateral), in_ttc_corridor=float(in_ttc_corridor), ttc_lateral_gate=float(self.cfg.ttc_lateral_gate), ttc_front_min_longitudinal=float(self.cfg.ttc_front_min_longitudinal), ttc_front_max_longitudinal=float(self.cfg.ttc_front_max_longitudinal), in_cbf_corridor=float(in_cbf_corridor), cbf_lateral_gate=float(self.cfg.cbf_lateral_gate), close_distance_relevant=close_distance_relevant, cbf_relevant=cbf_relevant)
 
     def project(self, raw_action, env=None, prev_exec_action=None):
         t0 = time.perf_counter()
@@ -268,7 +278,7 @@ class CBFBuiltinSafetyFilter:
         ego, ego_obj = self._extract_ego_state(env)
         obs, obs_d = self._extract_obstacles(env, ego_obj, ego[:2])
         safe, cbf_active = True, False
-        eval_info = dict(min_dist=np.inf, min_ttc=np.inf, h_min=np.inf, cbf_min=np.inf, cbf_violation=0.0, predicted_collision=0.0, closing_speed=0.0, obstacle_longitudinal=np.nan, obstacle_lateral=np.nan, in_ttc_corridor=1.0, ttc_lateral_gate=float(self.cfg.ttc_lateral_gate))
+        eval_info = dict(min_dist=np.inf, min_ttc=np.inf, h_min=np.inf, cbf_min=np.inf, cbf_violation=0.0, predicted_collision=0.0, closing_speed=0.0, obstacle_longitudinal=np.nan, obstacle_lateral=np.nan, in_ttc_corridor=1.0, ttc_lateral_gate=float(self.cfg.ttc_lateral_gate), in_cbf_corridor=1.0, cbf_lateral_gate=float(self.cfg.cbf_lateral_gate), close_distance_relevant=0.0, cbf_relevant=1.0)
         if obs is not None:
             eval_info = self.evaluate_raw_cbf(raw, ego, obs)
             cbf_active = (obs_d <= self.cfg.cbf_activation_distance)
@@ -278,7 +288,14 @@ class CBFBuiltinSafetyFilter:
                 ttc_ok = True
             else:
                 ttc_ok = (eval_info["min_ttc"] > self.cfg.ttc_activation_threshold) or (not self.cfg.require_approaching) or (not approaching)
-            safe = (eval_info["predicted_collision"] == 0.0 and eval_info["min_dist"] > (self.cfg.obstacle_radius + self.cfg.safe_distance) and ((eval_info["cbf_violation"] == 0.0) or (not cbf_active)) and ttc_ok)
+            cbf_relevant = bool(eval_info.get("cbf_relevant", 1.0))
+            if not cbf_active:
+                cbf_ok = True
+            elif not cbf_relevant:
+                cbf_ok = True
+            else:
+                cbf_ok = (eval_info["cbf_violation"] == 0.0)
+            safe = (eval_info["predicted_collision"] == 0.0 and eval_info["min_dist"] > (self.cfg.obstacle_radius + self.cfg.safe_distance) and cbf_ok and ttc_ok)
         builtin_action, success, status, builtin_exception = self.adapter.act(env)
         builtin_action = np.clip(self.cfg.builtin_action_scale * builtin_action, -1.0, 1.0)
         if self.cfg.preserve_raw_accel_if_positive and raw[1] > 0:
@@ -294,7 +311,7 @@ class CBFBuiltinSafetyFilter:
         info = dict(
             cbf_safe=float(safe), cbf_active=float(cbf_active), cbf_violation=float(eval_info["cbf_violation"]), predicted_collision=float(eval_info["predicted_collision"]),
             min_pred_dist=float(eval_info["min_dist"]), min_pred_ttc=float(eval_info["min_ttc"]), min_pred_h_cbf=float(eval_info["h_min"]), min_pred_cbf=float(eval_info["cbf_min"]),
-            obstacle_distance=float(obs_d), closing_speed=float(eval_info["closing_speed"]), ttc_relevant=float(bool(eval_info.get("in_ttc_corridor", 1.0))), in_ttc_corridor=float(eval_info.get("in_ttc_corridor", 1.0)), obstacle_longitudinal=float(eval_info.get("obstacle_longitudinal", np.nan)), obstacle_lateral=float(eval_info.get("obstacle_lateral", np.nan)), ttc_lateral_gate=float(eval_info.get("ttc_lateral_gate", self.cfg.ttc_lateral_gate)), raw_action=raw.copy(), builtin_action=np.asarray(builtin_action, dtype=np.float32).copy(), exec_action=np.asarray(exec_action, dtype=np.float32).copy(),
+            obstacle_distance=float(obs_d), closing_speed=float(eval_info["closing_speed"]), ttc_relevant=float(bool(eval_info.get("in_ttc_corridor", 1.0))), in_ttc_corridor=float(eval_info.get("in_ttc_corridor", 1.0)), obstacle_longitudinal=float(eval_info.get("obstacle_longitudinal", np.nan)), obstacle_lateral=float(eval_info.get("obstacle_lateral", np.nan)), ttc_lateral_gate=float(eval_info.get("ttc_lateral_gate", self.cfg.ttc_lateral_gate)), cbf_relevant=float(eval_info.get("cbf_relevant", 1.0)), in_cbf_corridor=float(eval_info.get("in_cbf_corridor", 1.0)), cbf_lateral_gate=float(eval_info.get("cbf_lateral_gate", self.cfg.cbf_lateral_gate)), close_distance_relevant=float(eval_info.get("close_distance_relevant", 0.0)), raw_action=raw.copy(), builtin_action=np.asarray(builtin_action, dtype=np.float32).copy(), exec_action=np.asarray(exec_action, dtype=np.float32).copy(),
             projection_residual=float(np.linalg.norm(diff)), projection_cost=float(np.sum(diff ** 2)), filter_active=float(not safe), selected_candidate_type=("raw_safe" if safe else "builtin_correction"), builtin_policy_name=self.cfg.builtin_policy_name,
             builtin_policy_success=float(success), builtin_policy_status=status, builtin_policy_class=self.adapter.builtin_policy_class, builtin_policy_exception=builtin_exception or self.adapter.build_exception, fallback=float(success < 0.5), filter_time_ms=float((time.perf_counter() - t0) * 1000.0)
         )
