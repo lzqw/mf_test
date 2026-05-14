@@ -16,6 +16,7 @@ class SafePullbackExperience(NamedTuple):
     filter_active: jax.Array
     state_violation: jax.Array
     is_success: jax.Array
+    cost: jax.Array
 
     @staticmethod
     def create(obs, raw_action, exec_action, reward, terminated, truncated, next_obs, info):
@@ -34,5 +35,6 @@ class SafePullbackExperience(NamedTuple):
             safe_violation=info["safe_violation"],
             filter_active=info["filter_active"],
             state_violation=info["state_violation"],
-            is_success=info["is_success"],
+            is_success=info.get("is_success", info.get("success", info.get("goal_met", info.get("task_success", 0.0)))),
+            cost=info.get("cost", 0.0),
         )
