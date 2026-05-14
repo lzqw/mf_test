@@ -80,19 +80,20 @@ def save_state_checkpoint(agent, path):
         pickle.dump(agent.state, f)
 
 
-def eval_agent(agent,args):
+# MetaDrive uses a process-level singleton engine. Creating a second env
+# in the same process after the training env has initialized the engine
+# can trigger "Can not call this API after engine initialization".
+# Therefore eval reuses the existing env. For fully isolated eval,
+# use a subprocess-based evaluator.
+def eval_agent(agent,args,env):
     mets=[]
-    env=SafeMetaDriveSampleWrapper(args.env_name,use_filter=args.use_filter,filter_type=args.filter_type,filter_cfg=SampleVehicleFilterConfig(num_local_samples=args.num_local_samples,num_prev_samples=args.num_prev_samples,num_maneuver_samples=args.num_maneuver_samples,horizon=args.horizon,dt=args.dt,steer_limit=args.steer_limit,throttle_limit=args.throttle_limit,brake_limit=args.brake_limit,max_dsteer=args.max_dsteer,max_daccel=args.max_daccel,safe_radius=args.safe_radius,ttc_min=args.ttc_min,h_vo_margin=args.h_vo_margin,lane_margin_min=args.lane_margin_min,allowed_lane_change=args.allowed_lane_change,lane_corridor_margin=args.lane_corridor_margin,max_abs_lateral_from_start_lane=args.max_abs_lateral_from_start_lane,vo_activation_distance=args.vo_activation_distance,ttc_activation_threshold=args.ttc_activation_threshold,min_closing_speed=args.min_closing_speed),terminate_on_safety_violation=args.terminate_on_safety_violation,safety_cost_termination=args.safety_cost_termination,**build_env_kwargs(args))
-    try:
-        for ep in range(args.eval_episodes):
-            obs,_=env.reset(seed=args.seed+1000+ep); done=False; ret=0.0; steps=0; far=[]; apr=[]; info={}; costs=[]; vels=[]; nsc=[]; fbs=[]; crashes=[]; out_of_roads=[]; safe_violations=[]; sample_filter_active=[]; vcr=[]; mpd=[]; mpt=[]; mph=[]; vov=[]; ttcv=[]; lv=[]; ft=[]; failures=[]; safety_failures=[]; terminated_by_safety=[]
-            while not done and steps<1000:
-                a=env.action_space.sample() if agent is None else np.asarray(agent.get_action(jax.random.PRNGKey(args.seed+ep+steps), obs[None])[0])
-                obs,r,term,trunc,info=env.step(a); done=term or trunc; ret+=float(r); steps+=1; far.append(float(info.get('filter_active',0.0))); apr.append(float(info.get('projection_residual',0.0))); costs.append(float(info.get('cost',0.0))); vels.append(float(info.get('velocity',0.0))); nsc.append(float(info.get('no_safe_candidate',0.0))); fbs.append(float(info.get('fallback',0.0))); vcr.append(float(info.get('valid_candidate_ratio',0.0))); mpd.append(float(info.get('min_pred_dist',np.nan))); mpt.append(float(info.get('min_pred_ttc',np.nan))); mph.append(float(info.get('min_pred_h_vo',np.nan))); vov.append(float(info.get('vo_violation',0.0))); ttcv.append(float(info.get('ttc_violation',0.0))); lv.append(float(info.get('lane_violation',0.0))); ft.append(float(info.get('filter_time_ms',0.0))); crashes.append(float(info.get('crash',0.0))); out_of_roads.append(float(info.get('out_of_road',0.0))); safe_violations.append(float(info.get('safe_violation',0.0))); sample_filter_active.append(float(info.get('sample_filter_active',0.0))); failures.append(float(info.get('failure',0.0))); safety_failures.append(float(info.get('safety_failure',0.0))); terminated_by_safety.append(float(info.get('terminated_by_safety',0.0)))
-            metric = dict(return_=ret,episode_length=steps,success_rate=float(info.get("is_success",0.0)),crash_rate=float(max(crashes)) if crashes else 0.0,out_of_road_rate=float(max(out_of_roads)) if out_of_roads else 0.0,cost_mean=float(np.mean(costs)) if costs else 0.0,velocity_mean=float(np.mean(vels)) if vels else 0.0,FAR=float(np.mean(far)) if far else 0.0,APR=float(np.mean(apr)) if apr else 0.0,safe_violation_rate=float(max(safe_violations)) if safe_violations else 0.0,failure_rate=float(max(failures)) if failures else 0.0,safety_failure_rate=float(max(safety_failures)) if safety_failures else 0.0,terminated_by_safety_rate=float(max(terminated_by_safety)) if terminated_by_safety else 0.0,sample_filter_active_rate=float(np.mean(sample_filter_active)) if sample_filter_active else 0.0,no_safe_candidate_rate=float(np.mean(nsc)) if nsc else 0.0,fallback_rate=float(np.mean(fbs)) if fbs else 0.0,valid_candidate_ratio=float(np.mean(vcr)) if vcr else 0.0,min_pred_dist=safe_nanmin(mpd,0.0),min_pred_ttc=safe_nanmin(mpt,0.0),min_pred_h_vo=safe_nanmin(mph,0.0),vo_violation_rate=float(np.mean(vov)) if vov else 0.0,ttc_violation_rate=float(np.mean(ttcv)) if ttcv else 0.0,lane_violation_rate=float(np.mean(lv)) if lv else 0.0,filter_time_ms=float(np.mean(ft)) if ft else 0.0)
-            mets.append(metric)
-    finally:
-        env.close()
+    for ep in range(args.eval_episodes):
+        obs,_=env.reset(seed=args.seed+1000+ep); done=False; ret=0.0; steps=0; far=[]; apr=[]; info={}; costs=[]; vels=[]; nsc=[]; fbs=[]; crashes=[]; out_of_roads=[]; safe_violations=[]; sample_filter_active=[]; vcr=[]; mpd=[]; mpt=[]; mph=[]; vov=[]; ttcv=[]; lv=[]; ft=[]; failures=[]; safety_failures=[]; terminated_by_safety=[]
+        while not done and steps<1000:
+            a=env.action_space.sample() if agent is None else np.asarray(agent.get_action(jax.random.PRNGKey(args.seed + 1000 + ep * 10000 + steps), obs[None])[0])
+            obs,r,term,trunc,info=env.step(a); done=term or trunc; ret+=float(r); steps+=1; far.append(float(info.get('filter_active',0.0))); apr.append(float(info.get('projection_residual',0.0))); costs.append(float(info.get('cost',0.0))); vels.append(float(info.get('velocity',0.0))); nsc.append(float(info.get('no_safe_candidate',0.0))); fbs.append(float(info.get('fallback',0.0))); vcr.append(float(info.get('valid_candidate_ratio',0.0))); mpd.append(float(info.get('min_pred_dist',np.nan))); mpt.append(float(info.get('min_pred_ttc',np.nan))); mph.append(float(info.get('min_pred_h_vo',np.nan))); vov.append(float(info.get('vo_violation',0.0))); ttcv.append(float(info.get('ttc_violation',0.0))); lv.append(float(info.get('lane_violation',0.0))); ft.append(float(info.get('filter_time_ms',0.0))); crashes.append(float(info.get('crash',0.0))); out_of_roads.append(float(info.get('out_of_road',0.0))); safe_violations.append(float(info.get('safe_violation',0.0))); sample_filter_active.append(float(info.get('sample_filter_active',0.0))); failures.append(float(info.get('failure',0.0))); safety_failures.append(float(info.get('safety_failure',0.0))); terminated_by_safety.append(float(info.get('terminated_by_safety',0.0)))
+        metric = dict(return_=ret,episode_length=steps,success_rate=float(info.get("is_success",0.0)),crash_rate=float(max(crashes)) if crashes else 0.0,out_of_road_rate=float(max(out_of_roads)) if out_of_roads else 0.0,cost_mean=float(np.mean(costs)) if costs else 0.0,velocity_mean=float(np.mean(vels)) if vels else 0.0,FAR=float(np.mean(far)) if far else 0.0,APR=float(np.mean(apr)) if apr else 0.0,safe_violation_rate=float(max(safe_violations)) if safe_violations else 0.0,failure_rate=float(max(failures)) if failures else 0.0,safety_failure_rate=float(max(safety_failures)) if safety_failures else 0.0,terminated_by_safety_rate=float(max(terminated_by_safety)) if terminated_by_safety else 0.0,sample_filter_active_rate=float(np.mean(sample_filter_active)) if sample_filter_active else 0.0,no_safe_candidate_rate=float(np.mean(nsc)) if nsc else 0.0,fallback_rate=float(np.mean(fbs)) if fbs else 0.0,valid_candidate_ratio=float(np.mean(vcr)) if vcr else 0.0,min_pred_dist=safe_nanmin(mpd,0.0),min_pred_ttc=safe_nanmin(mpt,0.0),min_pred_h_vo=safe_nanmin(mph,0.0),vo_violation_rate=float(np.mean(vov)) if vov else 0.0,ttc_violation_rate=float(np.mean(ttcv)) if ttcv else 0.0,lane_violation_rate=float(np.mean(lv)) if lv else 0.0,filter_time_ms=float(np.mean(ft)) if ft else 0.0)
+        mets.append(metric)
     keys = mets[0].keys()
     result = {}
     for k in keys:
@@ -190,7 +191,8 @@ def main():
             )
         if step%args.eval_interval==0:
             eval_start = time.perf_counter()
-            e=eval_agent(agent,args)
+            e=eval_agent(agent,args,env)
+            obs,_=env.reset(seed=args.seed + step + 1)
             eval_time = time.perf_counter() - eval_start
             e['step']=step
             e['safety_score']=float(e.get('crash_rate',0.0)+e.get('out_of_road_rate',0.0)+e.get('cost_mean',0.0)+e.get('fallback_rate',0.0))
