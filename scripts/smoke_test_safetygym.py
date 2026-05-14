@@ -71,7 +71,7 @@ if __name__ == "__main__":
     p.add_argument("--env_id", type=str, default=None)
     p.add_argument("--episodes", type=int, default=1)
     p.add_argument("--use_filter", action="store_true")
-    p.add_argument("--filter_type", default="hybrid", choices=["none", "action", "smooth", "control", "hybrid"])
+    p.add_argument("--filter_type", default="hybrid", choices=["none", "action", "smooth", "control", "hybrid", "sample_shield"])
     p.add_argument("--render_mode", default=None)
     args = p.parse_args()
 

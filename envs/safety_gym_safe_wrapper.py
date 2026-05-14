@@ -19,6 +19,16 @@ def _default_filter_info(raw_action: np.ndarray, exec_action: np.ndarray):
         "cost_aware_active": 0.0,
         "min_h": np.nan,
         "cbf_violation": 0.0,
+        "num_candidates": 0.0,
+        "num_safe_candidates": 0.0,
+        "safe_candidate_ratio": 0.0,
+        "emergency_active": 0.0,
+        "global_min_h": np.nan,
+        "front_h": np.nan,
+        "left_h": np.nan,
+        "right_h": np.nan,
+        "filter_active_005": float(residual > 0.05),
+        "filter_active_010": float(residual > 0.10),
     }
 
 
