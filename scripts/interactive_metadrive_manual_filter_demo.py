@@ -79,6 +79,13 @@ def parse_args():
     p.add_argument("--mpc_turn_bias_angle", type=float, default=0.10)
     p.add_argument("--mpc_turn_bias_steps", type=int, default=5)
     p.add_argument("--mpc_turn_bias_decay", type=float, default=0.9)
+    p.add_argument("--mpc_enable_direction_commit", action=argparse.BooleanOptionalAction, default=True)
+    p.add_argument("--mpc_direction_commit_steps", type=int, default=25)
+    p.add_argument("--mpc_direction_commit_release_h", type=float, default=0.3)
+    p.add_argument("--mpc_reverse_steer_penalty_weight", type=float, default=3.0)
+    p.add_argument("--mpc_previous_steer_tracking_weight", type=float, default=0.5)
+    p.add_argument("--mpc_previous_steer_decay", type=float, default=0.95)
+    p.add_argument("--mpc_min_committed_steer_abs", type=float, default=0.05)
     p.add_argument("--show_status_panel", action=argparse.BooleanOptionalAction, default=False)
     p.add_argument("--strict_filter_check", action=argparse.BooleanOptionalAction, default=True)
     p.add_argument("--print_every", type=int, default=20)
@@ -214,6 +221,13 @@ def main():
             turn_bias_angle=args.mpc_turn_bias_angle,
             turn_bias_steps=args.mpc_turn_bias_steps,
             turn_bias_decay=args.mpc_turn_bias_decay,
+            enable_direction_commit=args.mpc_enable_direction_commit,
+            direction_commit_steps=args.mpc_direction_commit_steps,
+            direction_commit_release_h=args.mpc_direction_commit_release_h,
+            reverse_steer_penalty_weight=args.mpc_reverse_steer_penalty_weight,
+            previous_steer_tracking_weight=args.mpc_previous_steer_tracking_weight,
+            previous_steer_decay=args.mpc_previous_steer_decay,
+            min_committed_steer_abs=args.mpc_min_committed_steer_abs,
         )
         filt = MPCVehicleCBFSafetyFilter(mpc_cfg)
     else:
@@ -282,6 +296,9 @@ def main():
                 f"raw_mpc_steer_angle={filter_info.get('raw_mpc_steer_angle', 0):.3f} alpha_min_bound={filter_info.get('alpha_min_bound', 0):.3f}",
                 f"turn_bias_ref0={filter_info.get('turn_bias_ref0', 0):.3f} turn_bias_weight={filter_info.get('turn_bias_weight', 0):.3f}",
                 f"cbf_hinge_weight={filter_info.get('cbf_hinge_weight', 0):.3f} cbf_terminal_hinge_weight={filter_info.get('cbf_terminal_hinge_weight', 0):.3f}",
+                f"committed_sign={filter_info.get('committed_sign', 0):.1f} commit_steps_left={filter_info.get('commit_steps_left', 0):.0f} effective_sign_s={filter_info.get('effective_sign_s', 0):.1f}",
+                f"prev_mpc_steer={filter_info.get('prev_mpc_steer', 0):.3f} reverse_steer_penalty_weight={filter_info.get('reverse_steer_penalty_weight', 0):.3f}",
+                f"previous_steer_tracking_weight={filter_info.get('previous_steer_tracking_weight', 0):.3f}",
                 f"preserve_raw_accel={filter_info.get('preserve_raw_accel', 0):.1f} disable_mpc_brake={filter_info.get('disable_mpc_brake', 0):.1f}",
                 f"raw_accel_preserved={filter_info.get('raw_accel_preserved', 0):.1f} accel_modified_by_mpc={filter_info.get('accel_modified_by_mpc', 0):.1f}",
                 f"mpc_accel_cmd={filter_info.get('mpc_accel_cmd', 0):.3f}",
