@@ -142,7 +142,12 @@ def main():
     p.add_argument('--diffusion_steps',type=int,default=10); p.add_argument('--num_ent_timesteps',type=int,default=10); p.add_argument('--policy_noise_scale',type=float,default=0.3)
     p.add_argument('--entropy_reg_mode',choices=['legacy','likelihood_tn','flac_tn'],default='legacy'); p.add_argument('--use_tn_energy',action='store_true'); p.add_argument('--candidate_temp',type=float,default=0.1); p.add_argument('--beta_normal_entropy',type=float,default=1.0); p.add_argument('--min_effective_entropy',type=float,default=-20.0); p.add_argument('--target_effective_entropy',type=float,default=1.0); p.add_argument('--normal_energy_coef',type=float,default=0.05); p.add_argument('--weight_mix',type=float,default=0.05)
     args=p.parse_args(); np.random.seed(args.seed)
-    log=Path(args.log_dir); log.mkdir(parents=True,exist_ok=True); writer=SummaryWriter(str(log/'tb')); (log/'args.json').write_text(json.dumps(vars(args),indent=2,sort_keys=True))
+    fallback_pass_side_value = -1.0 if args.fallback_pass_side == "left" else 1.0
+    log=Path(args.log_dir); log.mkdir(parents=True,exist_ok=True); writer=SummaryWriter(str(log/'tb'))
+    args_payload = dict(vars(args))
+    args_payload["fallback_pass_side_raw"] = args.fallback_pass_side
+    args_payload["fallback_pass_side_value"] = fallback_pass_side_value
+    (log/'args.json').write_text(json.dumps(args_payload,indent=2,sort_keys=True))
 
     mpc_cbf_cfg = None
     cbf_builtin_cfg = None
@@ -201,7 +206,7 @@ def main():
             blend_with_raw=args.blend_with_raw,
             correction_min_throttle=args.correction_min_throttle,
             preserve_raw_accel_if_positive=args.preserve_raw_accel_if_positive,
-            fallback_pass_side=args.fallback_pass_side,
+            fallback_pass_side=fallback_pass_side_value,
             fallback_avoid_distance=args.fallback_avoid_distance,
             fallback_max_steer=args.fallback_max_steer,
             fallback_min_steer=args.fallback_min_steer,
