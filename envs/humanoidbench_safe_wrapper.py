@@ -18,6 +18,7 @@ class SafeHumanoidBenchWrapper(gym.Wrapper):
         mean_path: str | None = None,
         var_path: str | None = None,
         policy_type: str | None = None,
+        augment_reach_obs: bool = False,
         **env_kwargs,
     ):
         if policy_type is not None:
@@ -30,11 +31,46 @@ class SafeHumanoidBenchWrapper(gym.Wrapper):
         env = gym.make(env_name, render_mode=render_mode, **env_kwargs)
         super().__init__(env)
         self.use_filter = use_filter
+        self.augment_reach_obs = augment_reach_obs
         self.safe_filter = HumanoidSafeFilter(filter_cfg or HumanoidSafeFilterConfig())
+        if self.augment_reach_obs and self.env.action_space.shape[-1] == 3:
+            base_obs_space = self.env.observation_space
+            self.observation_space = gym.spaces.Box(
+                low=-np.inf,
+                high=np.inf,
+                shape=(base_obs_space.shape[0] + 9,),
+                dtype=np.float32,
+            )
 
     def reset(self, *, seed=None, options=None):
         self.safe_filter.reset()
-        return self.env.reset(seed=seed, options=options)
+        obs, info = self.env.reset(seed=seed, options=options)
+        return self._augment_obs(obs), info
+
+    def _get_hier_task(self):
+        return self.env.unwrapped.task
+
+    def _get_base_task(self):
+        task = self.env.unwrapped.task
+        if hasattr(task, "task"):
+            return task.task
+        return task
+
+    def _augment_obs(self, obs):
+        if not self.augment_reach_obs:
+            return obs
+        try:
+            if self.env.action_space.shape[-1] != 3:
+                return obs
+            hier_task = self._get_hier_task()
+            base_task = self._get_base_task()
+            last_target = np.asarray(hier_task.last_target, dtype=np.float32).reshape(3)
+            goal = np.asarray(base_task.goal, dtype=np.float32).reshape(3)
+            hand = np.asarray(self.env.unwrapped.robot.left_hand_position(), dtype=np.float32).reshape(3)
+            extra = np.concatenate([last_target, goal - last_target, hand - goal]).astype(np.float32)
+            return np.concatenate([np.asarray(obs, dtype=np.float32), extra], axis=0)
+        except Exception:
+            return obs
 
     def _get_safety_metrics(self) -> Dict[str, float]:
         out = dict(head_height=0.0, torso_upright=1.0, fall=0.0,
@@ -83,6 +119,7 @@ class SafeHumanoidBenchWrapper(gym.Wrapper):
                 "prior_deviation": float(np.linalg.norm(exec_action)),
             }
         next_obs, reward, terminated, truncated, info = self.env.step(exec_action)
+        next_obs = self._augment_obs(next_obs)
         info = dict(info)
         success_flag = bool(info.get("success", False)) or float(info.get("reward_success", 0.0) > 0.0)
         terminated_failure = float(bool(terminated) and not success_flag)
