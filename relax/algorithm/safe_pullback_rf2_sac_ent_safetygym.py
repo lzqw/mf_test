@@ -138,11 +138,11 @@ class SafePullbackRF2SACENTSafetyGym(Algorithm):
             safe_energy_next = jnp.zeros_like(reward)
             safe_n_next = safe_t_next = safe_iso_next = safe_gate_next = safe_residual_next = jnp.zeros_like(reward)
             alpha = jnp.float32(self.alpha_value) if self.fixed_alpha else jnp.exp(p.log_alpha)
-            surrogate_ready = self.use_filter_surrogate and (state.step >= self.surrogate_warmup_steps)
+            surrogate_gate = jnp.where(state.step >= self.surrogate_warmup_steps, 1.0, 0.0)
             if self.entropy_reg_mode == "flac_tn":
                 raw_next_action, entropy = self.agent.get_action_ent(k_next, (p.policy, p.log_alpha, p.q1, p.q2), next_obs)
                 raw_next_action = jnp.clip(raw_next_action, -1.0, 1.0)
-                if surrogate_ready:
+                if self.use_filter_surrogate:
                     t_terminal = jnp.ones((next_obs.shape[0],), dtype=jnp.float32) * 0.999
                     v_terminal = self.agent.policy(p.policy, next_obs, raw_next_action, t_terminal)
                     e_n_terminal, e_t_terminal, e_iso_terminal, safe_gate_next, safe_residual_next = compute_surrogate_filter_energy(next_obs, raw_next_action, v_terminal)
@@ -160,7 +160,11 @@ class SafePullbackRF2SACENTSafetyGym(Algorithm):
                 raw_next_action, entropy = self.agent.get_action_ent(k_next, (p.policy, p.log_alpha, p.q1, p.q2), next_obs)
                 raw_next_action = jnp.clip(raw_next_action, -1.0, 1.0)
                 entropy_total = entropy
-            exec_next_hat = self.agent.get_exec_action_hat(p.g, next_obs, raw_next_action) if surrogate_ready else raw_next_action
+            if self.use_filter_surrogate:
+                exec_next_pred = jax.lax.stop_gradient(self.agent.get_exec_action_hat(p.g, next_obs, raw_next_action))
+                exec_next_hat = raw_next_action + surrogate_gate * (exec_next_pred - raw_next_action)
+            else:
+                exec_next_hat = raw_next_action
             exec_next_hat = jax.lax.stop_gradient(exec_next_hat)
             q1_t = self.agent.q(p.target_q1, next_obs, exec_next_hat)
             q2_t = self.agent.q(p.target_q2, next_obs, exec_next_hat)
@@ -170,7 +174,7 @@ class SafePullbackRF2SACENTSafetyGym(Algorithm):
             elif self.entropy_reg_mode == "likelihood_tn":
                 t_terminal = jnp.ones((next_obs.shape[0],), dtype=jnp.float32) * 0.999
                 v_terminal = self.agent.policy(p.policy, next_obs, raw_next_action, t_terminal)
-                if surrogate_ready:
+                if self.use_filter_surrogate:
                     e_n_terminal, _, _, _, _ = compute_surrogate_filter_energy(next_obs, raw_next_action, v_terminal)
                 else:
                     e_n_terminal = jnp.zeros((next_obs.shape[0], 1), dtype=jnp.float32)
@@ -202,7 +206,7 @@ class SafePullbackRF2SACENTSafetyGym(Algorithm):
                 td_loss = jnp.mean((pred - jax.lax.stop_gradient(yp)) ** 2)
                 lb = jnp.mean(jax.nn.relu(projection_cost - pred) ** 2)
                 l_cf = jnp.float32(0.0)
-                if surrogate_ready:
+                if self.use_filter_surrogate:
                     cf_policy_keys = jax.random.split(k_qp_policy, 8)
                     cf_policy = jax.vmap(
                         lambda sk: self.agent.get_action(sk, (p.policy, p.log_alpha, p.q1, p.q2), obs)
@@ -214,7 +218,8 @@ class SafePullbackRF2SACENTSafetyGym(Algorithm):
                     cf_exec_hat = jax.lax.stop_gradient(self.agent.get_exec_action_hat(p.g, cf_obs, cf_actions))
                     d_cf_hat = jnp.sum((cf_actions - cf_exec_hat) ** 2, axis=-1)
                     q_cf = self.agent.get_qp(qp, cf_obs, cf_actions)
-                    l_cf = jnp.mean((q_cf - d_cf_hat) ** 2)
+                    l_cf_pred = jnp.mean((q_cf - d_cf_hat) ** 2)
+                    l_cf = surrogate_gate * l_cf_pred
                 total = td_loss + 0.5 * l_cf + 0.5 * lb
                 aux = dict(pred=pred, td_loss=td_loss, l_cf=l_cf, lb=lb)
                 return total, aux
@@ -274,7 +279,11 @@ class SafePullbackRF2SACENTSafetyGym(Algorithm):
 
             projection_residual_candidates = jnp.sqrt(jnp.maximum(self.agent.get_qp(p.qp, obs_rep, clean), 0.0))
 
-            exec_clean_hat = self.agent.get_exec_action_hat(p.g, obs_rep, clean) if surrogate_ready else clean
+            if self.use_filter_surrogate:
+                exec_clean_pred = jax.lax.stop_gradient(self.agent.get_exec_action_hat(p.g, obs_rep, clean))
+                exec_clean_hat = clean + surrogate_gate * (exec_clean_pred - clean)
+            else:
+                exec_clean_hat = clean
             exec_clean_hat = jax.lax.stop_gradient(exec_clean_hat)
             q_reward_raw = jnp.minimum(self.agent.q(p.q1, obs_rep, clean), self.agent.q(p.q2, obs_rep, clean))
             q_reward = jnp.minimum(self.agent.q(p.q1, obs_rep, exec_clean_hat), self.agent.q(p.q2, obs_rep, exec_clean_hat))
@@ -311,11 +320,12 @@ class SafePullbackRF2SACENTSafetyGym(Algorithm):
                 qp_penalty = jnp.mean(self.agent.get_qp(p.qp, obs_r, noisy_r))
                 residual = jnp.sqrt(jnp.maximum(self.agent.get_qp(p.qp, obs_r, noisy_r), 0.0))
                 if self.use_tn_energy:
-                    if surrogate_ready:
+                    if self.use_filter_surrogate:
                         v_pred = self.agent.policy(pp, obs_r, noisy_r, t_r)
                         e_n, e_t, e_iso, gate, residual_xt = compute_surrogate_filter_energy(obs_r, noisy_r, v_pred)
-                        actor_safe = jnp.mean(e_n + e_t) if self.safe_energy_variant == "normal_tangent" else jnp.mean(e_n + self.safe_iso_coef * e_iso)
-                        return flow_loss + alpha * self.tn_coef * actor_safe, (flow_loss, actor_safe, jnp.mean(e_n), jnp.mean(e_t), jnp.mean(gate), jnp.mean(residual_xt), actor_safe)
+                        actor_safe_surrogate = jnp.mean(e_n + e_t) if self.safe_energy_variant == "normal_tangent" else jnp.mean(e_n + self.safe_iso_coef * e_iso)
+                        actor_safe = surrogate_gate * actor_safe_surrogate + (1.0 - surrogate_gate) * qp_penalty
+                        return flow_loss + alpha * self.tn_coef * actor_safe, (flow_loss, actor_safe, jnp.mean(e_n), jnp.mean(e_t), jnp.mean(gate), jnp.mean(residual_xt), actor_safe_surrogate)
                     return flow_loss + alpha * self.tn_coef * qp_penalty, (flow_loss, qp_penalty, qp_penalty, jnp.float32(0.0), jnp.float32(0.0), jnp.mean(residual), qp_penalty)
                 return flow_loss, (flow_loss, jnp.float32(0.0), qp_penalty, jnp.float32(0.0), jnp.float32(0.0), jnp.mean(residual), qp_penalty)
 
@@ -408,7 +418,8 @@ class SafePullbackRF2SACENTSafetyGym(Algorithm):
                         safe_energy_iso_mean=jnp.mean(safe_iso_next),
                         safe_energy_gate_mean=jnp.mean(safe_gate_next),
                         safe_energy_residual_mean=jnp.mean(safe_residual_next),
-                        target_safe_energy=jnp.float32(self.target_safe_energy))
+                        target_safe_energy=jnp.float32(self.target_safe_energy),
+                        surrogate_gate=jnp.float32(surrogate_gate))
             return ns, info
 
         self._update = _update
