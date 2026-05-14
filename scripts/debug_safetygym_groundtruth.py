@@ -1,6 +1,13 @@
 import argparse
+import sys
+from pathlib import Path
+
 import numpy as np
 import safety_gymnasium
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 from relax.safety.safety_gym_filter import SafetyGymFilterConfig, SafetyGymHardFilter
 
@@ -38,7 +45,14 @@ def main():
 
     dump('reset')
     for t in range(args.steps):
-        obs, rew, term, trunc, info = env.step(env.action_space.sample())
+        out = env.step(env.action_space.sample())
+        if len(out) == 6:
+            obs, rew, cost, term, trunc, info = out
+        elif len(out) == 5:
+            obs, rew, term, trunc, info = out
+            cost = info.get("cost", 0.0)
+        else:
+            raise RuntimeError(f"Unexpected env.step return length: {len(out)}")
         ego = f._extract_ego_state_from_env(env)
         hazards = f._extract_hazards_from_env(env)
         d = np.nan
