@@ -468,7 +468,66 @@ class SafetyGymHardFilter:
         emergency_active = 0.0
         safe_candidate_ratio = 0.0
         global_min_h = front_h = left_h = right_h = np.nan
-        if self.filter_type in ["sample_shield", "gt_shield"]:
+        if self.filter_type == "gt_shield":
+            projected_raw = self._project_feasible(a0, prev, action_space, env_id)
+            ego = self._extract_ego_state_from_env(env)
+            hazards = self._extract_hazards_from_env(env)
+            objects = self._extract_objects_from_env(env)
+            selected_candidate_type = "none"
+            predicted_min_h = np.nan
+            current_min_h = np.nan
+            nearest_hazard_dist = np.nan
+            gt_known = 0.0
+            if (not ego["known"]) or (len(hazards) == 0):
+                a = projected_raw
+                num_candidates = num_safe_candidates = 1
+                safe_candidate_ratio = 1.0
+                emergency_active = 0.0
+                selected_candidate_type = "projected_raw_no_gt"
+            else:
+                gt_known = 1.0
+                cur = self._compute_min_h(ego["pos"], hazards)
+                current_min_h = float(cur["min_h"])
+                nearest_hazard_dist = float(cur["nearest_dist"])
+                cands = self._generate_gt_candidates(projected_raw, a0, prev, action_space, env_id)
+                scores = [self._predict_candidate_min_h(ego, hazards, ci, env_id) for ci in cands]
+                num_candidates = len(cands)
+                safe_idx = [i for i, s in enumerate(scores) if s >= 0.0]
+                num_safe_candidates = len(safe_idx)
+                safe_candidate_ratio = float(num_safe_candidates / max(1, num_candidates))
+                if safe_idx:
+                    costs = [float(np.sum((cands[i] - a0) ** 2) + 0.1 * np.sum((cands[i] - prev) ** 2)) for i in safe_idx]
+                    bi = safe_idx[int(np.argmin(costs))]
+                    a = cands[bi]
+                    predicted_min_h = float(scores[bi])
+                    selected_candidate_type = "safe_candidate"
+                else:
+                    emergency_active = 1.0
+                    bi = int(np.argmax(scores))
+                    best = cands[bi]
+                    best_h = float(scores[bi])
+                    selected_candidate_type = "emergency_best_pred"
+                    em = []
+                    if current_min_h < 0.0 or best_h < 0.0:
+                        if "Car" in env_id and cur["nearest_hazard_pos"] is not None:
+                            rel = cur["nearest_hazard_pos"] - ego["pos"]
+                            left = np.array([-np.sin(ego["heading"]), np.cos(ego["heading"])], dtype=np.float32)
+                            side = np.sign(float(np.dot(rel, left)))
+                            em.append(np.array([-0.5 * side, -0.6], dtype=np.float32))
+                        elif cur["nearest_hazard_pos"] is not None:
+                            d = ego["pos"] - cur["nearest_hazard_pos"]
+                            n = np.linalg.norm(d)
+                            if n > self.cfg.gt_eps:
+                                em.append(d / n)
+                    for e in em:
+                        ce = self._project_feasible(e, prev, action_space, env_id)
+                        sh = self._predict_candidate_min_h(ego, hazards, ce, env_id)
+                        if sh > best_h:
+                            best, best_h, selected_candidate_type = ce, float(sh), "emergency_backup"
+                    a = best
+                    predicted_min_h = best_h
+
+        elif self.filter_type == "sample_shield":
             projected = a.copy()
             ego = self._extract_ego_state_from_env(env)
             hazards = self._extract_hazards_from_env(env)
@@ -478,50 +537,6 @@ class SafetyGymHardFilter:
             current_min_h = np.nan
             nearest_hazard_dist = np.nan
             gt_known = 0.0
-            if self.filter_type == "gt_shield":
-                projected_raw = self._project_feasible(a0, prev, action_space, env_id)
-                if (not ego["known"]) or (len(hazards) == 0):
-                    a = projected_raw
-                    num_candidates = num_safe_candidates = 1
-                    safe_candidate_ratio = 1.0
-                    emergency_active = 0.0
-                    selected_candidate_type = "projected_raw_no_gt"
-                else:
-                    gt_known = 1.0
-                    cur = self._compute_min_h(ego["pos"], hazards)
-                    current_min_h = float(cur["min_h"])
-                    nearest_hazard_dist = float(cur["nearest_dist"])
-                    cands = self._generate_gt_candidates(projected_raw, a0, prev, action_space, env_id)
-                    scores = [self._predict_candidate_min_h(ego, hazards, ci, env_id) for ci in cands]
-                    num_candidates = len(cands)
-                    safe_idx = [i for i, s in enumerate(scores) if s >= 0.0]
-                    num_safe_candidates = len(safe_idx)
-                    safe_candidate_ratio = float(num_safe_candidates / max(1, num_candidates))
-                    if safe_idx:
-                        costs = [float(np.sum((cands[i] - a0) ** 2) + 0.1 * np.sum((cands[i] - prev) ** 2)) for i in safe_idx]
-                        bi = safe_idx[int(np.argmin(costs))]
-                        a = cands[bi]; predicted_min_h = float(scores[bi]); selected_candidate_type = "safe_candidate"
-                    else:
-                        emergency_active = 1.0
-                        bi = int(np.argmax(scores))
-                        best = cands[bi]; best_h = float(scores[bi]); selected_candidate_type = "emergency_best_pred"
-                        em = []
-                        if current_min_h < 0.0 or best_h < 0.0:
-                            if "Car" in env_id and cur["nearest_hazard_pos"] is not None:
-                                rel = cur["nearest_hazard_pos"] - ego["pos"]
-                                left = np.array([-np.sin(ego["heading"]), np.cos(ego["heading"])], dtype=np.float32)
-                                side = np.sign(float(np.dot(rel, left)))
-                                em.append(np.array([-0.5 * side, -0.6], dtype=np.float32))
-                            elif cur["nearest_hazard_pos"] is not None:
-                                d = ego["pos"] - cur["nearest_hazard_pos"]; n = np.linalg.norm(d)
-                                if n > self.cfg.gt_eps:
-                                    em.append(d / n)
-                        for e in em:
-                            ce = self._project_feasible(e, prev, action_space, env_id)
-                            sh = self._predict_candidate_min_h(ego, hazards, ce, env_id)
-                            if sh > best_h:
-                                best, best_h, selected_candidate_type = ce, float(sh), "emergency_backup"
-                        a = best; predicted_min_h = best_h
 
             if hazards and ego["known"]:
                 dists = [float(np.linalg.norm(h["pos"] - ego["pos"]) - h["radius"]) for h in hazards]
