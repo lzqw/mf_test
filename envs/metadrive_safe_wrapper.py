@@ -10,7 +10,7 @@ from relax.safety.metadrive_cbf_builtin_filter import CBFBuiltinSafetyFilter, CB
 
 
 class SafeMetaDriveSampleWrapper(gym.Wrapper):
-    def __init__(self, env_name="FlatThreeLaneStraight", use_filter=True, filter_type="sample_vo", filter_cfg=None, mpc_cbf_cfg=None, render_mode=None, terminate_on_safety_violation: bool = True, safety_cost_termination: bool = True, **env_kwargs):
+    def __init__(self, env_name="FlatThreeLaneStraight", use_filter=True, filter_type="sample_vo", filter_cfg=None, mpc_cbf_cfg=None, cbf_builtin_cfg=None, render_mode=None, terminate_on_safety_violation: bool = True, safety_cost_termination: bool = True, **env_kwargs):
         env = gym.make(env_name, render_mode=render_mode, **env_kwargs)
         super().__init__(env)
         assert isinstance(self.action_space, gym.spaces.Box) and self.action_space.shape == (2,)
@@ -33,7 +33,7 @@ class SafeMetaDriveSampleWrapper(gym.Wrapper):
         elif filter_type == "cbf_builtin":
             fcfg = filter_cfg or SampleVehicleFilterConfig()
             default_cfg = CBFBuiltinFilterConfig(dt=float(getattr(fcfg,"dt",0.1)),horizon=int(getattr(fcfg,"horizon",10)),steer_limit=float(getattr(fcfg,"steer_limit",0.7)),throttle_limit=float(getattr(fcfg,"throttle_limit",0.8)),brake_limit=float(getattr(fcfg,"brake_limit",-0.8)),max_dsteer=float(getattr(fcfg,"max_dsteer",0.2)),max_daccel=float(getattr(fcfg,"max_daccel",0.3)))
-            self.safe_filter = CBFBuiltinSafetyFilter(mpc_cbf_cfg or default_cfg)
+            self.safe_filter = CBFBuiltinSafetyFilter(cbf_builtin_cfg or default_cfg)
         else:
             self.safe_filter = SampleBasedVehicleSafetyFilter(filter_cfg or SampleVehicleFilterConfig())
         self.prev_exec_action = np.zeros(2, dtype=np.float32)

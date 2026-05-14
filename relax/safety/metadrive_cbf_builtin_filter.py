@@ -37,18 +37,32 @@ class MetaDriveBuiltinPolicyAdapter:
         self.policy_name = policy_name
         self.policy = None
         self.policy_status = "not_initialized"
+        self.builtin_policy_class = None
+        self.constructor_signature = None
+        self.build_exception = None
 
     def reset(self):
         self.policy = None
         self.policy_status = "reset"
+        self.builtin_policy_class = None
+        self.constructor_signature = None
+        self.build_exception = None
 
     def _get_vehicle(self, env):
         u = getattr(env, "unwrapped", env)
         return getattr(u, "vehicle", None) or getattr(u, "agent", None)
 
+    def _get_agent_id(self, env):
+        u = getattr(env, "unwrapped", env)
+        agent = getattr(u, "agent", None)
+        return getattr(agent, "id", None) or getattr(u, "agent_id", None) or "default_agent"
+
     def _build_policy(self, env):
-        if self.policy_name == "fallback_lane":
+        self.build_exception = None
+        if self.policy_name in ["fallback_lane", "fallback_obstacle_avoid"]:
             self.policy_status = "fallback_lane_following"
+            self.builtin_policy_class = self.policy_name
+            self.constructor_signature = "fallback"
             return
         modules = {
             "idm": ("metadrive.policy.idm_policy", "IDMPolicy"),
@@ -62,8 +76,10 @@ class MetaDriveBuiltinPolicyAdapter:
             cls = getattr(mod, cls_name, None) or getattr(mod, "PPOExpertPolicy", None)
             if cls is None:
                 raise RuntimeError("policy class missing")
-            veh = self._get_vehicle(env)
+            self.builtin_policy_class = getattr(cls, '__name__', str(cls))
             sig = inspect.signature(cls)
+            self.constructor_signature = str(sig)
+            veh = self._get_vehicle(env)
             kwargs = {}
             if "control_object" in sig.parameters:
                 kwargs["control_object"] = veh
@@ -78,7 +94,8 @@ class MetaDriveBuiltinPolicyAdapter:
             self.policy_status = "builtin_constructed"
         except Exception as e:
             self.policy = None
-            self.policy_status = f"build_failed:{e}"
+            self.build_exception = repr(e)
+            self.policy_status = "build_failed"
 
     def _fallback_lane_follow(self, env):
         veh = self._get_vehicle(env)
@@ -99,20 +116,51 @@ class MetaDriveBuiltinPolicyAdapter:
             pass
         return np.array([steer, throttle], dtype=np.float32)
 
+    def _fallback_obstacle_avoid(self, env):
+        lane_action = self._fallback_lane_follow(env)
+        veh = self._get_vehicle(env)
+        ego = np.asarray(getattr(veh, "position", [0.0, 0.0]), dtype=np.float32)
+        tm = getattr(getattr(env, "unwrapped", env), "traffic_manager", None)
+        objs = list(getattr(tm, "vehicles", {}).values()) if tm is not None and hasattr(tm, 'vehicles') else []
+        nearest = None
+        best = np.inf
+        for o in objs:
+            if o is None or o is veh:
+                continue
+            p = np.asarray(getattr(o, 'position', [0.0,0.0]), dtype=np.float32)
+            d = float(np.linalg.norm(p - ego))
+            if d < best:
+                best, nearest = d, p
+        if nearest is None or best > 12.0:
+            return lane_action
+        lateral = nearest[1] - ego[1]
+        avoid = -np.sign(lateral) * min(0.35, (12.0 - best) / 12.0 * 0.35)
+        steer = float(np.clip(lane_action[0] + avoid, -0.7, 0.7))
+        throttle = float(np.clip(max(lane_action[1], 0.2), -0.2, 0.45))
+        return np.array([steer, throttle], dtype=np.float32)
+
     def act(self, env):
-        if self.policy is None and self.policy_name != "fallback_lane":
+        if self.policy is None and self.policy_name not in ["fallback_lane", "fallback_obstacle_avoid"]:
             self._build_policy(env)
+        builtin_exception = None
         if self.policy is not None:
-            try:
-                for args in [(), (env,), (self._get_vehicle(env),)]:
-                    try:
-                        act = self.policy.act(*args)
-                        return np.clip(np.asarray(act, dtype=np.float32).reshape(2), -1.0, 1.0), 1.0, self.policy_status
-                    except TypeError:
-                        continue
-            except Exception:
-                pass
-        return np.clip(self._fallback_lane_follow(env), -1.0, 1.0), 0.0, "fallback_lane_following"
+            aid = self._get_agent_id(env)
+            vehicle = self._get_vehicle(env)
+            for args in [(aid,), (), (env,), (vehicle,)]:
+                try:
+                    act = self.policy.act(*args)
+                    self.policy_status = "builtin_constructed_and_called"
+                    return np.clip(np.asarray(act, dtype=np.float32).reshape(2), -1.0, 1.0), 1.0, self.policy_status, None
+                except TypeError:
+                    continue
+                except Exception as e:
+                    builtin_exception = repr(e)
+            self.policy_status = "builtin_constructed_but_act_failed"
+        if self.policy_name == "fallback_obstacle_avoid":
+            return np.clip(self._fallback_obstacle_avoid(env), -1.0, 1.0), 0.0, "fallback_lane_following", builtin_exception or self.build_exception
+        if self.policy_status == "build_failed":
+            return np.clip(self._fallback_lane_follow(env), -1.0, 1.0), 0.0, "build_failed", builtin_exception or self.build_exception
+        return np.clip(self._fallback_lane_follow(env), -1.0, 1.0), 0.0, (self.policy_status or "fallback_lane_following"), builtin_exception or self.build_exception
 
 
 class CBFBuiltinSafetyFilter:
@@ -216,7 +264,7 @@ class CBFBuiltinSafetyFilter:
             approaching = eval_info["closing_speed"] > self.cfg.min_closing_speed
             ttc_ok = (eval_info["min_ttc"] > self.cfg.ttc_activation_threshold) or (not self.cfg.require_approaching) or (not approaching)
             safe = (eval_info["predicted_collision"] == 0.0 and eval_info["min_dist"] > (self.cfg.obstacle_radius + self.cfg.safe_distance) and ((eval_info["cbf_violation"] == 0.0) or (not cbf_active)) and ttc_ok)
-        builtin_action, success, status = self.adapter.act(env)
+        builtin_action, success, status, builtin_exception = self.adapter.act(env)
         builtin_action = np.clip(self.cfg.builtin_action_scale * builtin_action, -1.0, 1.0)
         if self.cfg.preserve_raw_accel_if_positive and raw[1] > 0:
             builtin_action[1] = max(builtin_action[1], raw[1])
@@ -233,6 +281,6 @@ class CBFBuiltinSafetyFilter:
             min_pred_dist=float(eval_info["min_dist"]), min_pred_ttc=float(eval_info["min_ttc"]), min_pred_h_cbf=float(eval_info["h_min"]), min_pred_cbf=float(eval_info["cbf_min"]),
             obstacle_distance=float(obs_d), closing_speed=float(eval_info["closing_speed"]), raw_action=raw.copy(), builtin_action=np.asarray(builtin_action, dtype=np.float32).copy(), exec_action=np.asarray(exec_action, dtype=np.float32).copy(),
             projection_residual=float(np.linalg.norm(diff)), projection_cost=float(np.sum(diff ** 2)), filter_active=float(not safe), selected_candidate_type=("raw_safe" if safe else "builtin_correction"), builtin_policy_name=self.cfg.builtin_policy_name,
-            builtin_policy_success=float(success), builtin_policy_status=status, fallback=float(success < 0.5), filter_time_ms=float((time.perf_counter() - t0) * 1000.0)
+            builtin_policy_success=float(success), builtin_policy_status=status, builtin_policy_class=self.adapter.builtin_policy_class, builtin_policy_exception=builtin_exception or self.adapter.build_exception, fallback=float(success < 0.5), filter_time_ms=float((time.perf_counter() - t0) * 1000.0)
         )
         return exec_action, info
