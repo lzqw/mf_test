@@ -39,16 +39,27 @@ class CBFBuiltinFilterConfig:
     preserve_raw_accel_if_positive: bool = False
     enable_rate_limit: bool = True
     debug: bool = False
+    fallback_pass_side: float = -1.0
+    fallback_avoid_distance: float = 18.0
+    fallback_max_steer: float = 0.45
+    fallback_min_steer: float = 0.12
+    fallback_target_speed: float = 3.0
+    fallback_speed_kp: float = 0.25
+    fallback_obstacle_lateral_gate: float = 4.5
+    fallback_obstacle_front_min: float = -1.0
+    fallback_obstacle_front_max: float = 20.0
 
 
 class MetaDriveBuiltinPolicyAdapter:
-    def __init__(self, policy_name: str = "idm"):
+    def __init__(self, policy_name: str = "idm", cfg: CBFBuiltinFilterConfig = None):
         self.policy_name = policy_name
         self.policy = None
         self.policy_status = "not_initialized"
         self.builtin_policy_class = None
         self.constructor_signature = None
         self.build_exception = None
+        self.cfg = cfg or CBFBuiltinFilterConfig()
+        self.last_info = {}
 
     def reset(self):
         self.policy = None
@@ -56,6 +67,7 @@ class MetaDriveBuiltinPolicyAdapter:
         self.builtin_policy_class = None
         self.constructor_signature = None
         self.build_exception = None
+        self.last_info = {}
 
     def _get_vehicle(self, env):
         u = getattr(env, "unwrapped", env)
@@ -129,24 +141,39 @@ class MetaDriveBuiltinPolicyAdapter:
         lane_action = self._fallback_lane_follow(env)
         veh = self._get_vehicle(env)
         ego = np.asarray(getattr(veh, "position", [0.0, 0.0]), dtype=np.float32)
-        tm = getattr(getattr(env, "unwrapped", env), "traffic_manager", None)
+        yaw = float(getattr(veh, "heading_theta", 0.0))
+        speed = float(getattr(veh, "speed", 0.0))
+        forward = np.array([np.cos(yaw), np.sin(yaw)], dtype=np.float32)
+        left = np.array([-np.sin(yaw), np.cos(yaw)], dtype=np.float32)
+        u = getattr(env, "unwrapped", env)
+        tm = getattr(u, "traffic_manager", None)
         objs = list(getattr(tm, "vehicles", {}).values()) if tm is not None and hasattr(tm, 'vehicles') else []
+        pk = getattr(u, "_parked_obj", None)
+        if pk is not None:
+            objs.append(pk)
         nearest = None
-        best = np.inf
+        best_lon = np.inf
+        best_lat = np.nan
         for o in objs:
             if o is None or o is veh:
                 continue
-            p = np.asarray(getattr(o, 'position', [0.0,0.0]), dtype=np.float32)
-            d = float(np.linalg.norm(p - ego))
-            if d < best:
-                best, nearest = d, p
-        if nearest is None or best > 12.0:
-            return lane_action
-        lateral = nearest[1] - ego[1]
-        avoid = -np.sign(lateral) * min(0.35, (12.0 - best) / 12.0 * 0.35)
-        steer = float(np.clip(lane_action[0] + avoid, -0.7, 0.7))
-        throttle = float(np.clip(max(lane_action[1], 0.2), -0.2, 0.45))
-        return np.array([steer, throttle], dtype=np.float32)
+            p = np.asarray(getattr(o, 'position', [0.0, 0.0]), dtype=np.float32)
+            rel = p - ego
+            lon = float(np.dot(rel, forward))
+            lat = float(np.dot(rel, left))
+            if lon < self.cfg.fallback_obstacle_front_min or lon > self.cfg.fallback_obstacle_front_max or abs(lat) > self.cfg.fallback_obstacle_lateral_gate:
+                continue
+            if lon < best_lon:
+                best_lon, best_lat, nearest = lon, lat, p
+        if nearest is None:
+            self.last_info = dict(fallback_obstacle_seen=0.0, fallback_obstacle_longitudinal=np.nan, fallback_obstacle_lateral=np.nan, fallback_avoid_bias=0.0, fallback_pass_side=float(self.cfg.fallback_pass_side), fallback_status="fallback_lane_following")
+            return lane_action, "fallback_lane_following"
+        strength = float(np.clip((self.cfg.fallback_avoid_distance - best_lon) / max(self.cfg.fallback_avoid_distance, 1e-6), 0.0, 1.0))
+        avoid_bias = float(self.cfg.fallback_pass_side * (self.cfg.fallback_min_steer + strength * (self.cfg.fallback_max_steer - self.cfg.fallback_min_steer)))
+        steer = float(np.clip(lane_action[0] + avoid_bias, -0.7, 0.7))
+        throttle = float(np.clip(self.cfg.fallback_speed_kp * (self.cfg.fallback_target_speed - speed), -0.3, 0.45))
+        self.last_info = dict(fallback_obstacle_seen=1.0, fallback_obstacle_longitudinal=float(best_lon), fallback_obstacle_lateral=float(best_lat), fallback_avoid_bias=avoid_bias, fallback_pass_side=float(self.cfg.fallback_pass_side), fallback_status="fallback_obstacle_avoid")
+        return np.array([steer, throttle], dtype=np.float32), "fallback_obstacle_avoid"
 
     def act(self, env):
         if self.policy is None and self.policy_name not in ["fallback_lane", "fallback_obstacle_avoid"]:
@@ -166,7 +193,8 @@ class MetaDriveBuiltinPolicyAdapter:
                     builtin_exception = repr(e)
             self.policy_status = "builtin_constructed_but_act_failed"
         if self.policy_name == "fallback_obstacle_avoid":
-            return np.clip(self._fallback_obstacle_avoid(env), -1.0, 1.0), 0.0, "fallback_lane_following", builtin_exception or self.build_exception
+            fb_action, fb_status = self._fallback_obstacle_avoid(env)
+            return np.clip(fb_action, -1.0, 1.0), 0.0, fb_status, builtin_exception or self.build_exception
         if self.policy_status == "build_failed":
             return np.clip(self._fallback_lane_follow(env), -1.0, 1.0), 0.0, "build_failed", builtin_exception or self.build_exception
         return np.clip(self._fallback_lane_follow(env), -1.0, 1.0), 0.0, (self.policy_status or "fallback_lane_following"), builtin_exception or self.build_exception
@@ -176,7 +204,7 @@ class CBFBuiltinSafetyFilter:
     def __init__(self, cfg: CBFBuiltinFilterConfig):
         self.cfg = cfg
         self.prev_exec_action = np.zeros(2, dtype=np.float32)
-        self.adapter = MetaDriveBuiltinPolicyAdapter(cfg.builtin_policy_name)
+        self.adapter = MetaDriveBuiltinPolicyAdapter(cfg.builtin_policy_name, cfg=cfg)
 
     def reset(self):
         self.prev_exec_action[:] = 0.0
@@ -315,4 +343,5 @@ class CBFBuiltinSafetyFilter:
             projection_residual=float(np.linalg.norm(diff)), projection_cost=float(np.sum(diff ** 2)), filter_active=float(not safe), selected_candidate_type=("raw_safe" if safe else "builtin_correction"), builtin_policy_name=self.cfg.builtin_policy_name,
             builtin_policy_success=float(success), builtin_policy_status=status, builtin_policy_class=self.adapter.builtin_policy_class, builtin_policy_exception=builtin_exception or self.adapter.build_exception, fallback=float(success < 0.5), filter_time_ms=float((time.perf_counter() - t0) * 1000.0)
         )
+        info.update(getattr(self.adapter, "last_info", {}) or {})
         return exec_action, info
