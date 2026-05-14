@@ -36,7 +36,8 @@ class SafePullbackRF2SACENTHumanoid(Algorithm):
                  entropy_reg_mode="legacy", candidate_temp=0.10,
                  beta_normal_entropy=1.0, min_effective_entropy=-20.0, target_effective_entropy=1.0,
                  normal_energy_coef=0.05, target_safe_energy=0.05,
-                 safe_iso_coef=0.05, safe_energy_variant="normal_iso", weight_mix=0.05, residual_radius=0.35, action_limit=1.0):
+                 safe_iso_coef=0.05, safe_energy_variant="normal_iso", weight_mix=0.05, residual_radius=0.35, action_limit=1.0,
+                 use_goal_candidate=False, high_level_max_delta=0.1):
         self.agent = agent
         self.gamma = gamma
         self.gamma_p = gamma_p
@@ -71,6 +72,8 @@ class SafePullbackRF2SACENTHumanoid(Algorithm):
         self.safe_iso_coef = safe_iso_coef
         self.safe_energy_variant = safe_energy_variant
         self.weight_mix = weight_mix
+        self.use_goal_candidate = use_goal_candidate
+        self.high_level_max_delta = high_level_max_delta
         self.optim = optax.adam(lr)
         self.policy_optim = optax.adam(lr)
         self.alpha_optim = optax.adam(alpha_lr)
@@ -244,15 +247,23 @@ class SafePullbackRF2SACENTHumanoid(Algorithm):
             k_t, k_local, k_rand, k_flow_noise = jax.random.split(k2, 4)
             K = self.K
 
-            n_fixed = 2
+            use_goal_candidate = bool(self.use_goal_candidate) and (act_dim == 3) and (obs.shape[-1] >= 9)
+            n_fixed = 3 if use_goal_candidate else 2
             n_local = int(max(K // 2, 1))
             n_uniform = int(max(K - n_fixed - n_local, 0))
 
             a_zero = jnp.zeros_like(raw_action)
+            if use_goal_candidate:
+                goal_minus_last_target = obs[..., -6:-3]
+                max_delta = jnp.maximum(jnp.float32(self.high_level_max_delta), 1e-6)
+                a_goal = jnp.clip(goal_minus_last_target / max_delta, -1.0, 1.0)
             local_noise = self.agent.noise_scale * jax.random.normal(k_local, (batch_size, n_local, act_dim))
             local_clean = jnp.clip(raw_action[:, None, :] + local_noise, -1.0, 1.0)
             uniform_clean = jax.random.uniform(k_rand, (batch_size, n_uniform, act_dim), minval=-1.0, maxval=1.0)
-            clean = jnp.concatenate([raw_action[:, None, :], a_zero[:, None, :], local_clean, uniform_clean], axis=1)
+            fixed_clean = [raw_action[:, None, :], a_zero[:, None, :]]
+            if use_goal_candidate:
+                fixed_clean.append(a_goal[:, None, :])
+            clean = jnp.concatenate(fixed_clean + [local_clean, uniform_clean], axis=1)
             clean = clean[:, :K, :]
 
             t = jax.random.uniform(k_t, (batch_size, self.K, 1), minval=1e-3, maxval=0.994)

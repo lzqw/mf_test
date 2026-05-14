@@ -70,6 +70,7 @@ def main():
 
     blocked_hands = getattr(train_args, "blocked_hands", None)
     small_obs = getattr(train_args, "small_obs", None)
+    augment_reach_obs = getattr(train_args, "augment_reach_obs", False)
 
     env = SafeHumanoidBenchWrapper(
         train_args.env_name,
@@ -88,6 +89,7 @@ def main():
         mean_path=getattr(train_args, "mean_path", None),
         var_path=getattr(train_args, "var_path", None),
         policy_type=getattr(train_args, "policy_type", None),
+        augment_reach_obs=augment_reach_obs,
         blocked_hands=blocked_hands,
         small_obs=small_obs,
     )
