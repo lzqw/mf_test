@@ -46,7 +46,30 @@ class SafetyGymFilterConfig:
     max_dspeed: float = 0.20
     hazard_warning: float = 0.35
     hazard_stop: float = 0.15
+    robot_radius: float = 0.20
+    hazard_radius: float = 0.20
+    safety_margin: float = 0.05
+    point_dt: float = 0.1
+    point_action_scale: float = 1.0
+    car_dt: float = 0.1
+    car_k_steer: float = 0.6
+    car_k_accel: float = 1.0
+    car_v_max: float = 2.0
+    shield_horizon: int = 1
+    gt_action_grid_size: int = 31
+    gt_eps: float = 1e-6
     eps: float = 1e-6
+
+
+def make_action_grid(grid_size, action_space):
+    adim = int(np.prod(action_space.shape))
+    if adim != 2:
+        return np.zeros((0, adim), dtype=np.float32)
+    xs = np.linspace(-1.0, 1.0, int(grid_size), dtype=np.float32)
+    ys = np.linspace(-1.0, 1.0, int(grid_size), dtype=np.float32)
+    xx, yy = np.meshgrid(xs, ys, indexing="xy")
+    grid = np.stack([xx.reshape(-1), yy.reshape(-1)], axis=-1)
+    return np.clip(grid, action_space.low, action_space.high).astype(np.float32)
 
 
 def extract_min_lidar_or_hazard(obs, info):
@@ -75,6 +98,80 @@ class SafetyGymHardFilter:
 
     def reset(self):
         return None
+
+    def _project_feasible(self, action, prev_exec_action, action_space, env_id):
+        a = np.asarray(action, dtype=np.float32).copy()
+        prev = np.asarray(prev_exec_action, dtype=np.float32).copy()
+        a = np.clip(a, action_space.low, action_space.high)
+        if "Car" in env_id and a.shape[0] >= 2 and prev.shape[0] >= 2:
+            a[0] = np.clip(a[0], -self.cfg.steer_limit, self.cfg.steer_limit)
+            a[1] = np.clip(a[1], -self.cfg.speed_limit, self.cfg.speed_limit)
+            a[0] = prev[0] + np.clip(a[0] - prev[0], -self.cfg.max_dsteer, self.cfg.max_dsteer)
+            a[1] = prev[1] + np.clip(a[1] - prev[1], -self.cfg.max_dspeed, self.cfg.max_dspeed)
+        else:
+            max_norm = self.cfg.max_action_norm_car if "Car" in env_id else self.cfg.max_action_norm_point
+            nrm = float(np.linalg.norm(a))
+            if nrm > max_norm:
+                a = a / max(nrm, self.cfg.eps) * max_norm
+            delta = np.clip(a - prev, -self.cfg.max_delta_point, self.cfg.max_delta_point)
+            a = prev + delta
+        return np.clip(a, action_space.low, action_space.high).astype(np.float32)
+
+    def _compute_min_h(self, pos, hazards):
+        if not hazards:
+            return {"min_h": np.inf, "nearest_dist": np.inf, "nearest_hazard_pos": None, "nearest_hazard_radius": np.inf}
+        dists = np.array([np.linalg.norm(pos - h["pos"]) for h in hazards], dtype=np.float32)
+        i = int(np.argmin(dists))
+        hs = [float(np.linalg.norm(pos - h["pos"]) - (self.cfg.robot_radius + h["radius"] + self.cfg.safety_margin)) for h in hazards]
+        return {"min_h": float(np.min(hs)), "nearest_dist": float(dists[i]), "nearest_hazard_pos": hazards[i]["pos"], "nearest_hazard_radius": float(hazards[i]["radius"])}
+
+    def _rollout_point(self, pos, action):
+        p = np.asarray(pos, dtype=np.float32).copy()
+        out = []
+        for _ in range(int(self.cfg.shield_horizon)):
+            p = p + self.cfg.point_dt * self.cfg.point_action_scale * np.asarray(action[:2], dtype=np.float32)
+            out.append(p.copy())
+        return out
+
+    def _rollout_car(self, pos, heading, speed, action):
+        p = np.asarray(pos, dtype=np.float32).copy()
+        hd = float(heading)
+        v = float(speed)
+        steer, throttle = float(action[0]), float(action[1])
+        out = []
+        for _ in range(int(self.cfg.shield_horizon)):
+            hd = hd + self.cfg.car_dt * self.cfg.car_k_steer * steer
+            v = float(np.clip(v + self.cfg.car_dt * self.cfg.car_k_accel * throttle, 0.0, self.cfg.car_v_max))
+            p = p + self.cfg.car_dt * v * np.array([np.cos(hd), np.sin(hd)], dtype=np.float32)
+            out.append(p.copy())
+        return out
+
+    def _predict_candidate_min_h(self, ego, hazards, action, env_id):
+        traj = self._rollout_car(ego["pos"], ego["heading"], ego["speed"], action) if "Car" in env_id else self._rollout_point(ego["pos"], action)
+        if not traj:
+            return np.inf
+        return float(np.min([self._compute_min_h(p, hazards)["min_h"] for p in traj]))
+
+    def _generate_gt_candidates(self, projected_raw, raw_action, prev_exec_action, action_space, env_id):
+        cands = [projected_raw, prev_exec_action, np.zeros_like(projected_raw), 0.25 * projected_raw, 0.5 * projected_raw, 0.75 * projected_raw, -0.3 * projected_raw]
+        adim = projected_raw.shape[0]
+        if adim == 2:
+            grid = make_action_grid(self.cfg.gt_action_grid_size, action_space)
+            cands.extend([g for g in grid])
+            if "Car" not in env_id:
+                nrm = float(np.linalg.norm(projected_raw))
+                if nrm > self.cfg.gt_eps:
+                    t = np.array([-projected_raw[1], projected_raw[0]], dtype=np.float32) / nrm
+                    cands += [0.4 * t, -0.4 * t]
+        if "Car" in env_id and adim >= 2:
+            prev_steer = float(prev_exec_action[0]) if prev_exec_action.shape[0] >= 2 else 0.0
+            prev_speed = float(prev_exec_action[1]) if prev_exec_action.shape[0] >= 2 else 0.0
+            cands += [np.array([projected_raw[0], min(projected_raw[1], 0.0)], np.float32), np.array([0.0, -0.5], np.float32), np.array([-0.4, -0.5], np.float32), np.array([0.4, -0.5], np.float32), np.array([-0.35, 0.2], np.float32), np.array([0.35, 0.2], np.float32), np.array([prev_steer, min(prev_speed, 0.0)], np.float32)]
+        proj = [self._project_feasible(ci, prev_exec_action, action_space, env_id) for ci in cands]
+        uniq = {}
+        for ci in proj:
+            uniq[tuple(np.round(ci, 4).tolist())] = ci
+        return list(uniq.values())
 
     def parse_lidar_danger(self, obs, info):
         danger = dict(global_min_dist=np.nan, front_min_dist=np.nan, left_min_dist=np.nan, right_min_dist=np.nan)
@@ -371,11 +468,61 @@ class SafetyGymHardFilter:
         emergency_active = 0.0
         safe_candidate_ratio = 0.0
         global_min_h = front_h = left_h = right_h = np.nan
-        if self.filter_type == "sample_shield":
+        if self.filter_type in ["sample_shield", "gt_shield"]:
             projected = a.copy()
             ego = self._extract_ego_state_from_env(env)
             hazards = self._extract_hazards_from_env(env)
             objects = self._extract_objects_from_env(env)
+            selected_candidate_type = "none"
+            predicted_min_h = np.nan
+            current_min_h = np.nan
+            nearest_hazard_dist = np.nan
+            gt_known = 0.0
+            if self.filter_type == "gt_shield":
+                projected_raw = self._project_feasible(a0, prev, action_space, env_id)
+                if (not ego["known"]) or (len(hazards) == 0):
+                    a = projected_raw
+                    num_candidates = num_safe_candidates = 1
+                    safe_candidate_ratio = 1.0
+                    emergency_active = 0.0
+                    selected_candidate_type = "projected_raw_no_gt"
+                else:
+                    gt_known = 1.0
+                    cur = self._compute_min_h(ego["pos"], hazards)
+                    current_min_h = float(cur["min_h"])
+                    nearest_hazard_dist = float(cur["nearest_dist"])
+                    cands = self._generate_gt_candidates(projected_raw, a0, prev, action_space, env_id)
+                    scores = [self._predict_candidate_min_h(ego, hazards, ci, env_id) for ci in cands]
+                    num_candidates = len(cands)
+                    safe_idx = [i for i, s in enumerate(scores) if s >= 0.0]
+                    num_safe_candidates = len(safe_idx)
+                    safe_candidate_ratio = float(num_safe_candidates / max(1, num_candidates))
+                    if safe_idx:
+                        costs = [float(np.sum((cands[i] - a0) ** 2) + 0.1 * np.sum((cands[i] - prev) ** 2)) for i in safe_idx]
+                        bi = safe_idx[int(np.argmin(costs))]
+                        a = cands[bi]; predicted_min_h = float(scores[bi]); selected_candidate_type = "safe_candidate"
+                    else:
+                        emergency_active = 1.0
+                        bi = int(np.argmax(scores))
+                        best = cands[bi]; best_h = float(scores[bi]); selected_candidate_type = "emergency_best_pred"
+                        em = []
+                        if current_min_h < 0.0 or best_h < 0.0:
+                            if "Car" in env_id and cur["nearest_hazard_pos"] is not None:
+                                rel = cur["nearest_hazard_pos"] - ego["pos"]
+                                left = np.array([-np.sin(ego["heading"]), np.cos(ego["heading"])], dtype=np.float32)
+                                side = np.sign(float(np.dot(rel, left)))
+                                em.append(np.array([-0.5 * side, -0.6], dtype=np.float32))
+                            elif cur["nearest_hazard_pos"] is not None:
+                                d = ego["pos"] - cur["nearest_hazard_pos"]; n = np.linalg.norm(d)
+                                if n > self.cfg.gt_eps:
+                                    em.append(d / n)
+                        for e in em:
+                            ce = self._project_feasible(e, prev, action_space, env_id)
+                            sh = self._predict_candidate_min_h(ego, hazards, ce, env_id)
+                            if sh > best_h:
+                                best, best_h, selected_candidate_type = ce, float(sh), "emergency_backup"
+                        a = best; predicted_min_h = best_h
+
             if hazards and ego["known"]:
                 dists = [float(np.linalg.norm(h["pos"] - ego["pos"]) - h["radius"]) for h in hazards]
                 nearest = float(np.min(dists))
@@ -447,14 +594,17 @@ class SafetyGymHardFilter:
             "front_h": front_h,
             "left_h": left_h,
             "right_h": right_h,
-            "gt_known": float(ego["known"]) if self.filter_type == "sample_shield" else 0.0,
-            "ego_x": float(ego["pos"][0]) if self.filter_type == "sample_shield" and ego["known"] else np.nan,
-            "ego_y": float(ego["pos"][1]) if self.filter_type == "sample_shield" and ego["known"] else np.nan,
-            "num_hazards": float(len(hazards)) if self.filter_type == "sample_shield" else 0.0,
-            "nearest_hazard_dist": danger.get("global_min_dist", np.nan) if self.filter_type == "sample_shield" else np.nan,
-            "predicted_min_h": global_min_h,
-            "selected_candidate_type": "safe_candidate" if self.filter_type == "sample_shield" and num_safe_candidates > 0 else ("emergency" if self.filter_type == "sample_shield" else "none"),
-            "num_objects": float(len(objects)) if self.filter_type == "sample_shield" else 0.0,
+            "gt_known": gt_known if self.filter_type == "gt_shield" else (float(ego["known"]) if self.filter_type == "sample_shield" else 0.0),
+            "ego_x": float(ego["pos"][0]) if self.filter_type in ["sample_shield", "gt_shield"] and ego["known"] else np.nan,
+            "ego_y": float(ego["pos"][1]) if self.filter_type in ["sample_shield", "gt_shield"] and ego["known"] else np.nan,
+            "num_hazards": float(len(hazards)) if self.filter_type in ["sample_shield", "gt_shield"] else 0.0,
+            "nearest_hazard_dist": nearest_hazard_dist if self.filter_type == "gt_shield" else (danger.get("global_min_dist", np.nan) if self.filter_type == "sample_shield" else np.nan),
+            "predicted_min_h": predicted_min_h if self.filter_type == "gt_shield" else global_min_h,
+            "current_min_h": current_min_h if self.filter_type == "gt_shield" else np.nan,
+            "selected_candidate_type": selected_candidate_type if self.filter_type == "gt_shield" else ("safe_candidate" if self.filter_type == "sample_shield" and num_safe_candidates > 0 else ("emergency" if self.filter_type == "sample_shield" else "none")),
+            "num_objects": float(len(objects)) if self.filter_type in ["sample_shield", "gt_shield"] else 0.0,
+            "cbf_violation": float(current_min_h < 0.0) if self.filter_type == "gt_shield" and np.isfinite(current_min_h) else cbf_violation,
+            "min_h": current_min_h if self.filter_type == "gt_shield" else min_h,
             "filter_active_005": float(residual > 0.05),
             "filter_active_010": float(residual > 0.10),
         }

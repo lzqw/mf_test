@@ -57,7 +57,7 @@ def test_env(env_id, episodes, use_filter, filter_type, render_mode):
         for i in range(5):
             obs, reward, term, trunc, info = wenv.step(wenv.action_space.sample())
             if filter_type in ["gt_shield", "sample_shield"] and i < 3:
-                print("[shield]", {k: info.get(k, np.nan) for k in ["gt_known", "ego_x", "ego_y", "num_hazards", "nearest_hazard_dist", "current_min_h", "predicted_min_h", "num_candidates", "num_safe_candidates", "safe_candidate_ratio", "emergency_active", "selected_candidate_type"]})
+                print("[shield]", {k: info.get(k, np.nan) for k in ["gt_known", "num_hazards", "nearest_hazard_dist", "current_min_h", "predicted_min_h", "num_safe_candidates", "safe_candidate_ratio", "emergency_active", "selected_candidate_type", "projection_residual", "filter_active_005", "filter_active_010"]})
                 if not np.isfinite(float(info.get("num_hazards", np.nan))) or float(info.get("num_hazards", 0.0)) <= 0:
                     print(f"[WARN] {env_id} has no hazard ground-truth extracted at step {i}")
             miss = [k for k in REQ_KEYS if k not in info]
@@ -75,7 +75,7 @@ if __name__ == "__main__":
     p.add_argument("--env_id", type=str, default=None)
     p.add_argument("--episodes", type=int, default=1)
     p.add_argument("--use_filter", action="store_true")
-    p.add_argument("--filter_type", default="hybrid", choices=["none", "action", "smooth", "control", "hybrid", "sample_shield"])
+    p.add_argument("--filter_type", default="hybrid", choices=["none", "action", "smooth", "control", "hybrid", "sample_shield", "gt_shield"])
     p.add_argument("--render_mode", default=None)
     args = p.parse_args()
 
