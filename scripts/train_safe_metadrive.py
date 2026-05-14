@@ -31,13 +31,16 @@ def make_algo(args, obs_dim, act_dim):
     key=jax.random.PRNGKey(args.seed)
     net, params = create_safe_pullback_rf2_sac_ent_net(key, obs_dim, act_dim, hidden_sizes=[256]*3, diffusion_hidden_sizes=[256]*3,
         num_timesteps=args.diffusion_steps, num_ent_timesteps=args.num_ent_timesteps, alpha_value=args.alpha_value,
-        fixed_alpha=args.fixed_alpha, init_alpha=args.init_alpha, noise_scale=args.policy_noise_scale)
+        fixed_alpha=args.fixed_alpha, init_alpha=args.init_alpha, noise_scale=args.policy_noise_scale,
+        use_directional_noise=args.use_directional_noise)
     return SafePullbackRF2SACENTMetaDrive(net, params, gamma=args.gamma, gamma_p=args.gamma_p, lr=args.lr, alpha_lr=args.alpha_lr,
         sample_k=args.sample_k, lambda_p=args.lambda_p, use_projection_critic=args.use_projection_critic, fixed_alpha=args.fixed_alpha,
         alpha_value=args.alpha_value, lambda_p_warmup_steps=args.lambda_p_warmup_steps, use_tn_energy=args.use_tn_energy,
         entropy_reg_mode=args.entropy_reg_mode, candidate_temp=args.candidate_temp, beta_normal_entropy=args.beta_normal_entropy,
         min_effective_entropy=args.min_effective_entropy, target_effective_entropy=args.target_effective_entropy,
-        normal_energy_coef=args.normal_energy_coef, weight_mix=args.weight_mix, residual_radius=args.residual_radius, action_limit=1.0)
+        normal_energy_coef=args.normal_energy_coef, weight_mix=args.weight_mix, residual_radius=args.residual_radius, action_limit=1.0,
+        num_uniform_candidates=args.num_uniform_candidates, include_zero_candidate=args.include_zero_candidate,
+        local_candidate_noise_scale=args.local_candidate_noise_scale)
 
 def is_finite_number(x):
     try:
@@ -142,6 +145,10 @@ def main():
     p.add_argument('--fixed_alpha',action='store_true'); p.add_argument('--alpha_value',type=float,default=0.1); p.add_argument('--init_alpha',type=float,default=0.1)
     p.add_argument('--residual_radius',type=float,default=1.0)
     p.add_argument('--diffusion_steps',type=int,default=10); p.add_argument('--num_ent_timesteps',type=int,default=10); p.add_argument('--policy_noise_scale',type=float,default=0.3)
+    p.add_argument('--use_directional_noise',action=argparse.BooleanOptionalAction,default=False)
+    p.add_argument('--num_uniform_candidates',type=int,default=0)
+    p.add_argument('--include_zero_candidate',action=argparse.BooleanOptionalAction,default=True)
+    p.add_argument('--local_candidate_noise_scale',type=float,default=-1.0)
     p.add_argument('--entropy_reg_mode',choices=['legacy','likelihood_tn','flac_tn'],default='legacy'); p.add_argument('--use_tn_energy',action='store_true'); p.add_argument('--candidate_temp',type=float,default=0.1); p.add_argument('--beta_normal_entropy',type=float,default=1.0); p.add_argument('--min_effective_entropy',type=float,default=-20.0); p.add_argument('--target_effective_entropy',type=float,default=1.0); p.add_argument('--normal_energy_coef',type=float,default=0.05); p.add_argument('--weight_mix',type=float,default=0.05)
     p.add_argument('--render_train',action=argparse.BooleanOptionalAction,default=False); p.add_argument('--render_mode',choices=['topdown','human'],default='topdown'); p.add_argument('--render_every',type=int,default=1); p.add_argument('--topdown_size',type=int,default=800); p.add_argument('--render_window',action=argparse.BooleanOptionalAction,default=True)
     args=p.parse_args(); np.random.seed(args.seed)
