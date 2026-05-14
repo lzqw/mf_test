@@ -55,7 +55,14 @@ class SafeSafetyGymWrapper(gym.Wrapper):
             exec_action = np.clip(raw_action, self.action_space.low, self.action_space.high)
             filter_info = _default_filter_info(raw_action, exec_action)
 
-        next_obs, reward, cost, terminated, truncated, info = self.env.step(exec_action)
+        out = self.env.step(exec_action)
+        if len(out) == 6:
+            next_obs, reward, cost, terminated, truncated, info = out
+        elif len(out) == 5:
+            next_obs, reward, terminated, truncated, info = out
+            cost = float(dict(info).get("cost", 0.0))
+        else:
+            raise RuntimeError(f"Unexpected env.step return length={len(out)} for env_id={self.env_id}")
         info = dict(info)
         info["cost"] = float(cost)
         info["cost_step"] = float(cost)
