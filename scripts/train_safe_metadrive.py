@@ -46,6 +46,8 @@ def is_finite_number(x):
         return False
 
 def build_env_kwargs(args):
+    if args.render_train:
+        return {"use_render": True}
     return {}
 
 
@@ -141,6 +143,7 @@ def main():
     p.add_argument('--residual_radius',type=float,default=1.0)
     p.add_argument('--diffusion_steps',type=int,default=10); p.add_argument('--num_ent_timesteps',type=int,default=10); p.add_argument('--policy_noise_scale',type=float,default=0.3)
     p.add_argument('--entropy_reg_mode',choices=['legacy','likelihood_tn','flac_tn'],default='legacy'); p.add_argument('--use_tn_energy',action='store_true'); p.add_argument('--candidate_temp',type=float,default=0.1); p.add_argument('--beta_normal_entropy',type=float,default=1.0); p.add_argument('--min_effective_entropy',type=float,default=-20.0); p.add_argument('--target_effective_entropy',type=float,default=1.0); p.add_argument('--normal_energy_coef',type=float,default=0.05); p.add_argument('--weight_mix',type=float,default=0.05)
+    p.add_argument('--render_train',action=argparse.BooleanOptionalAction,default=False); p.add_argument('--render_mode',choices=['topdown','human'],default='topdown'); p.add_argument('--render_every',type=int,default=1); p.add_argument('--topdown_size',type=int,default=800); p.add_argument('--render_window',action=argparse.BooleanOptionalAction,default=True)
     args=p.parse_args(); np.random.seed(args.seed)
     fallback_pass_side_value = -1.0 if args.fallback_pass_side == "left" else 1.0
     log=Path(args.log_dir); log.mkdir(parents=True,exist_ok=True); writer=SummaryWriter(str(log/'tb'))
@@ -263,6 +266,24 @@ def main():
         if step<args.start_steps: raw=env.action_space.sample()
         else: key,ak=jax.random.split(key); raw=np.asarray(agent.get_action(ak,obs[None])[0])
         nobs,reward,term,trunc,info=env.step(raw); exp=SafePullbackExperience.create(obs,raw,info['exec_action'],reward,term,trunc,nobs,info); buf.append(exp); buf=buf[-1_000_000:]; obs=nobs
+        if args.render_train and step % args.render_every == 0:
+            try:
+                if args.render_mode == "topdown":
+                    env.unwrapped.render(
+                        mode="topdown",
+                        window=args.render_window,
+                        screen_size=(args.topdown_size, args.topdown_size),
+                    )
+                else:
+                    env.render()
+            except TypeError:
+                try:
+                    env.unwrapped.render(mode=args.render_mode)
+                except Exception:
+                    env.render()
+            except Exception as e:
+                if step == 1 or step % max(args.render_every * 200, 1000) == 0:
+                    print("[render warning]", repr(e))
         if term or trunc: obs,_=env.reset()
         for k,tg in [('reward','train_env/reward'),('filter_active','train_env/filter_active'),('projection_residual','train_env/projection_residual'),('projection_cost','train_env/projection_cost'),('fall','train_env/fall'),('head_height','train_env/head_height'),('torso_upright','train_env/torso_upright'),('joint_angle_abs_max','train_env/joint_angle_abs_max'),('joint_vel_abs_max','train_env/joint_vel_abs_max')]:
             if k in info:
