@@ -9,7 +9,7 @@ from relax.safety.metadrive_mpc_cbf_filter import MPCVehicleCBFSafetyFilter, MPC
 
 
 class SafeMetaDriveSampleWrapper(gym.Wrapper):
-    def __init__(self, env_name="FlatThreeLaneStraight", use_filter=True, filter_type="sample_vo", filter_cfg=None, render_mode=None, terminate_on_safety_violation: bool = True, safety_cost_termination: bool = True, **env_kwargs):
+    def __init__(self, env_name="FlatThreeLaneStraight", use_filter=True, filter_type="sample_vo", filter_cfg=None, mpc_cbf_cfg=None, render_mode=None, terminate_on_safety_violation: bool = True, safety_cost_termination: bool = True, **env_kwargs):
         env = gym.make(env_name, render_mode=render_mode, **env_kwargs)
         super().__init__(env)
         assert isinstance(self.action_space, gym.spaces.Box) and self.action_space.shape == (2,)
@@ -17,7 +17,7 @@ class SafeMetaDriveSampleWrapper(gym.Wrapper):
         self.use_filter = bool(use_filter and filter_type != "none")
         if filter_type == "mpc_cbf":
             fcfg = filter_cfg or SampleVehicleFilterConfig()
-            mcfg = MPCVehicleCBFConfig(
+            default_mpc_cfg = MPCVehicleCBFConfig(
                 dt=float(getattr(fcfg, "dt", 0.1)),
                 horizon=int(getattr(fcfg, "horizon", 10)),
                 steer_limit=float(getattr(fcfg, "steer_limit", 0.7)),
@@ -28,7 +28,7 @@ class SafeMetaDriveSampleWrapper(gym.Wrapper):
                 obstacle_radius=float(getattr(fcfg, "obs_radius", 2.0)),
                 safe_distance=float(getattr(fcfg, "safe_radius", 4.0) - getattr(fcfg, "obs_radius", 1.5)),
             )
-            self.safe_filter = MPCVehicleCBFSafetyFilter(mcfg)
+            self.safe_filter = MPCVehicleCBFSafetyFilter(mpc_cbf_cfg or default_mpc_cfg)
         else:
             self.safe_filter = SampleBasedVehicleSafetyFilter(filter_cfg or SampleVehicleFilterConfig())
         self.prev_exec_action = np.zeros(2, dtype=np.float32)
