@@ -111,7 +111,7 @@ class MPCVehicleCBFSafetyFilter:
         ox, oy, oyaw, ov = map(float, obstacle)
         vox, voy = ov * np.cos(oyaw), ov * np.sin(oyaw)
         ex0, ey0 = ox - x, oy - y
-        evx0, evy0 = vox - v * np.cos(yaw), voy - v * np.sin(yaw)
+        evx0, evy0 = v * np.cos(yaw) - vox, v * np.sin(yaw) - voy
         cross0 = ex0 * evy0 - ey0 * evx0
         sign_s = 1.0 if cross0 > 0 else -1.0
         min_d, min_ttc, h_min, cbf_min = np.inf, np.inf, np.inf, np.inf
@@ -119,13 +119,13 @@ class MPCVehicleCBFSafetyFilter:
         hk_prev = None
         for k in range(H + 1):
             ex, ey = ox - x, oy - y
-            evx, evy = vox - v * np.cos(yaw), voy - v * np.sin(yaw)
+            evx, evy = v * np.cos(yaw) - vox, v * np.sin(yaw) - voy
             dot = ex * evx + ey * evy
             dist = np.sqrt(ex * ex + ey * ey)
             min_d = min(min_d, dist)
             closing = max(dot / max(dist, 1e-6), 0.0)
             if closing > 1e-6:
-                min_ttc = min(min_ttc, dist / closing)
+                min_ttc = min(min_ttc, max(dist - R, 0.0) / max(closing, 1e-6))
             h = sign_s * (ex * evy - ey * evx) - R * np.sqrt(evx * evx + evy * evy)
             h_min = min(h_min, h)
             if hk_prev is not None:
@@ -162,18 +162,19 @@ class MPCVehicleCBFSafetyFilter:
                 cost += 0.2 * (u_th[k] - u_th[k - 1]) ** 2
             ex = obstacle_points[k, 0] - x[k]; ey = obstacle_points[k, 1] - y[k]
             exn = obstacle_points[k + 1, 0] - x[k + 1]; eyn = obstacle_points[k + 1, 1] - y[k + 1]
-            evx = vox - v_ego * ca.cos(yaw[k]); evy = voy - v_ego * ca.sin(yaw[k])
-            evxn = vox - v_ego * ca.cos(yaw[k + 1]); evyn = voy - v_ego * ca.sin(yaw[k + 1])
+            evx = v_ego * ca.cos(yaw[k]) - vox; evy = v_ego * ca.sin(yaw[k]) - voy
+            evxn = v_ego * ca.cos(yaw[k + 1]) - vox; evyn = v_ego * ca.sin(yaw[k + 1]) - voy
             hk = sign_s * (ex * evy - ey * evx) - R * ca.sqrt(evx * evx + evy * evy + 1e-6)
             hkn = sign_s * (exn * evyn - eyn * evxn) - R * ca.sqrt(evxn * evxn + evyn * evyn + 1e-6)
             dot = ex * evx + ey * evy
-            cbf = ca.if_else(dot > 0, hkn - hk + u_al[k] * hk, 1.0)
-            g += [ca.if_else(enable_cbf, cbf, 1.0)]
+            if enable_cbf:
+                cbf = ca.if_else(dot > 0, hkn - hk + u_al[k] * hk, 1.0)
+                g += [cbf]
         nxyz = 3 * (N + 1)
         lbw = [-ca.inf] * nxyz + [-self.cfg.max_steer_angle] * N + [0.0] * N
         ubw = [ca.inf] * nxyz + [self.cfg.max_steer_angle] * N + [1.0] * N
-        lbg = [0.0] * (3 + 3 * N) + [0.0] * N
-        ubg = [0.0] * (3 + 3 * N) + [ca.inf] * N
+        lbg = [0.0] * (3 + 3 * N) + ([0.0] * N if enable_cbf else [])
+        ubg = [0.0] * (3 + 3 * N) + ([ca.inf] * N if enable_cbf else [])
         nlp = {"x": w, "f": cost, "g": ca.vertcat(*g)}
         solver = ca.nlpsol("solver", "ipopt", nlp, {"ipopt.print_level": self.cfg.solver_print_level, "print_time": False, "ipopt.max_iter": self.cfg.solver_max_iter})
         x0 = np.zeros(int(w.shape[0]))
@@ -200,8 +201,13 @@ class MPCVehicleCBFSafetyFilter:
         else:
             raw_eval = self.evaluate_raw_cbf(raw, ego, obs)
             d0 = float(np.linalg.norm(obs[:2] - ego[:2]))
-            closing_speed = max(0.0, float(np.dot(obs[:2] - ego[:2], np.array([raw_eval['vox'], raw_eval['voy']]) - ego[3] * np.array([np.cos(ego[2]), np.sin(ego[2])])) / max(d0, 1e-6)))
-            cbf_active = bool((d0 < self.cfg.cbf_activation_distance and closing_speed > self.cfg.min_closing_speed) or (raw_eval['min_ttc'] < self.cfg.ttc_activation_threshold)) and self.cfg.enable_cbf
+            rel = obs[:2] - ego[:2]
+            ego_v = ego[3] * np.array([np.cos(ego[2]), np.sin(ego[2])])
+            ev = ego_v - np.array([raw_eval['vox'], raw_eval['voy']])
+            closing_speed = float(np.dot(rel, ev) / max(d0, 1e-6))
+            approaching = closing_speed > self.cfg.min_closing_speed
+            ttc = (max(d0 - (self.cfg.obstacle_radius + self.cfg.safe_distance), 0.0) / max(closing_speed, 1e-6)) if approaching else np.inf
+            cbf_active = bool((d0 < self.cfg.cbf_activation_distance and approaching) or (ttc < self.cfg.ttc_activation_threshold)) and self.cfg.enable_cbf
             if (not cbf_active) and (raw_eval["predicted_collision"] < 0.5):
                 exec_action = self._box_rate(raw, prev)
                 info = dict(selected_candidate_type="raw", filter_active=0.0, mpc_success=1.0, mpc_status="raw_safe")
@@ -226,5 +232,6 @@ class MPCVehicleCBFSafetyFilter:
         self.prev_exec_action = np.asarray(exec_action, dtype=np.float32).copy()
         diff = exec_action - raw
         min_ttc = float(info.get("min_ttc", np.inf))
+        info["filter_active"] = float(np.linalg.norm(diff) > 1e-6)
         info.update(dict(raw_action=raw, exec_action=exec_action, projection_residual=float(np.linalg.norm(diff)), projection_cost=float(np.sum(diff ** 2)), sample_filter_active=0.0, mpc_cbf_active=1.0, num_candidates=1, num_valid_candidates=1 if info.get("selected_candidate_type") == "raw" else 0, valid_candidate_ratio=float(1.0 if info.get("selected_candidate_type") == "raw" else 0.0), fallback=float(info.get("fallback", 0.0)), no_safe_candidate=float(info.get("no_safe_candidate", 0.0)), min_pred_dist=float(info.get("min_dist", np.inf)), min_pred_ttc=min_ttc, min_pred_h_cbf=float(info.get("h_min", np.inf)), min_pred_cbf=float(info.get("cbf_min", np.inf)), cbf_violation=float(info.get("cbf_violation", 0.0)), predicted_collision=float(info.get("predicted_collision", 0.0)), mpc_steer=float(info.get("mpc_steer", 0.0)), mpc_alpha_min=float(info.get("mpc_alpha_min", 1.0)), sign_s=float(info.get("sign_s", 1.0)), min_pred_h_vo=float(info.get("h_min", np.inf)), vo_violation=float(info.get("cbf_violation", 0.0)), ttc_violation=float(min_ttc < self.cfg.ttc_activation_threshold), lane_violation=float(1.0 if info.get("selected_candidate_type") == "mpc_failed_brake" else 0.0), filter_time_ms=float((time.perf_counter() - t0) * 1000.0)))
         return exec_action, info

@@ -53,6 +53,14 @@ def parse_args():
     p.add_argument("--ttc_activation_threshold", type=float, default=3.0)
     p.add_argument("--min_closing_speed", type=float, default=0.5)
     p.add_argument("--num_maneuver_samples", type=int, default=32)
+
+    p.add_argument("--mpc_target_speed", type=float, default=6.0)
+    p.add_argument("--mpc_lookahead_distance", type=float, default=20.0)
+    p.add_argument("--mpc_obstacle_radius", type=float, default=2.0)
+    p.add_argument("--mpc_safe_distance", type=float, default=2.0)
+    p.add_argument("--mpc_max_steer_angle", type=float, default=0.5)
+    p.add_argument("--mpc_fallback_brake", type=float, default=-0.4)
+    p.add_argument("--mpc_solver_max_iter", type=int, default=100)
     p.add_argument("--show_status_panel", action=argparse.BooleanOptionalAction, default=False)
     p.add_argument("--strict_filter_check", action=argparse.BooleanOptionalAction, default=True)
     p.add_argument("--print_every", type=int, default=20)
@@ -152,7 +160,26 @@ def main():
         num_maneuver_samples=args.num_maneuver_samples,
     )
     if args.filter_type == "mpc_cbf":
-        filt = MPCVehicleCBFSafetyFilter(MPCVehicleCBFConfig(dt=args.dt, horizon=args.horizon))
+        mpc_cfg = MPCVehicleCBFConfig(
+            dt=args.dt,
+            horizon=args.horizon,
+            steer_limit=0.7,
+            throttle_limit=0.8,
+            brake_limit=-0.8,
+            max_dsteer=args.max_dsteer,
+            max_daccel=args.max_daccel,
+            obstacle_radius=args.mpc_obstacle_radius,
+            safe_distance=args.mpc_safe_distance,
+            max_steer_angle=args.mpc_max_steer_angle,
+            target_speed=args.mpc_target_speed,
+            lookahead_distance=args.mpc_lookahead_distance,
+            cbf_activation_distance=args.vo_activation_distance,
+            ttc_activation_threshold=args.ttc_activation_threshold,
+            min_closing_speed=args.min_closing_speed,
+            fallback_brake=args.mpc_fallback_brake,
+            solver_max_iter=args.mpc_solver_max_iter,
+        )
+        filt = MPCVehicleCBFSafetyFilter(mpc_cfg)
     else:
         filt = SampleBasedVehicleSafetyFilter(cfg)
 

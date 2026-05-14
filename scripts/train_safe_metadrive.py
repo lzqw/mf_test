@@ -16,6 +16,7 @@ from envs.metadrive_safe_wrapper import SafeMetaDriveSampleWrapper
 from relax.algorithm.safe_pullback_rf2_sac_ent_metadrive import SafePullbackRF2SACENTMetaDrive
 from relax.network.safe_pullback_rf2_sac_ent import create_safe_pullback_rf2_sac_ent_net
 from relax.safety.metadrive_sample_filter import SampleVehicleFilterConfig
+from relax.safety.metadrive_mpc_cbf_filter import MPCVehicleCBFConfig
 from scripts.safe_pullback_experience import SafePullbackExperience
 
 class Batch(NamedTuple):
@@ -137,8 +138,30 @@ def main():
     p.add_argument('--entropy_reg_mode',choices=['legacy','likelihood_tn','flac_tn'],default='legacy'); p.add_argument('--use_tn_energy',action='store_true'); p.add_argument('--candidate_temp',type=float,default=0.1); p.add_argument('--beta_normal_entropy',type=float,default=1.0); p.add_argument('--min_effective_entropy',type=float,default=-20.0); p.add_argument('--target_effective_entropy',type=float,default=1.0); p.add_argument('--normal_energy_coef',type=float,default=0.05); p.add_argument('--weight_mix',type=float,default=0.05)
     args=p.parse_args(); np.random.seed(args.seed)
     log=Path(args.log_dir); log.mkdir(parents=True,exist_ok=True); writer=SummaryWriter(str(log/'tb')); (log/'args.json').write_text(json.dumps(vars(args),indent=2,sort_keys=True))
+
+    mpc_cbf_cfg = None
+    if args.filter_type == "mpc_cbf":
+        mpc_cbf_cfg = MPCVehicleCBFConfig(
+            dt=args.dt,
+            horizon=args.mpc_horizon,
+            steer_limit=args.steer_limit,
+            throttle_limit=args.throttle_limit,
+            brake_limit=args.brake_limit,
+            max_dsteer=args.max_dsteer,
+            max_daccel=args.max_daccel,
+            obstacle_radius=args.mpc_obstacle_radius,
+            safe_distance=args.mpc_safe_distance,
+            max_steer_angle=args.mpc_max_steer_angle,
+            target_speed=args.mpc_target_speed,
+            lookahead_distance=args.mpc_lookahead_distance,
+            cbf_activation_distance=args.vo_activation_distance,
+            ttc_activation_threshold=args.ttc_activation_threshold,
+            min_closing_speed=args.min_closing_speed,
+            fallback_brake=args.mpc_fallback_brake,
+            solver_max_iter=args.mpc_solver_max_iter,
+        )
     filter_cfg = SampleVehicleFilterConfig(num_local_samples=args.num_local_samples,num_prev_samples=args.num_prev_samples,num_maneuver_samples=args.num_maneuver_samples,horizon=(args.mpc_horizon if args.filter_type=='mpc_cbf' else args.horizon),dt=args.dt,steer_limit=args.steer_limit,throttle_limit=args.throttle_limit,brake_limit=args.brake_limit,max_dsteer=args.max_dsteer,max_daccel=args.max_daccel,safe_radius=(args.mpc_obstacle_radius+args.mpc_safe_distance if args.filter_type=='mpc_cbf' else args.safe_radius),obs_radius=args.mpc_obstacle_radius,ttc_min=args.ttc_min,h_vo_margin=args.h_vo_margin,lane_margin_min=args.lane_margin_min,allowed_lane_change=args.allowed_lane_change,lane_corridor_margin=args.lane_corridor_margin,max_abs_lateral_from_start_lane=args.max_abs_lateral_from_start_lane,vo_activation_distance=args.vo_activation_distance,ttc_activation_threshold=args.ttc_activation_threshold,min_closing_speed=args.min_closing_speed)
-    env=SafeMetaDriveSampleWrapper(args.env_name,use_filter=args.use_filter,filter_type=args.filter_type,filter_cfg=filter_cfg,terminate_on_safety_violation=args.terminate_on_safety_violation,safety_cost_termination=args.safety_cost_termination,**build_env_kwargs(args)); obs,_=reset_metadrive_env(env,args.seed)
+    env=SafeMetaDriveSampleWrapper(args.env_name,use_filter=args.use_filter,filter_type=args.filter_type,filter_cfg=filter_cfg,mpc_cbf_cfg=mpc_cbf_cfg,terminate_on_safety_violation=args.terminate_on_safety_violation,safety_cost_termination=args.safety_cost_termination,**build_env_kwargs(args)); obs,_=reset_metadrive_env(env,args.seed)
     start_index, num_scenarios = get_metadrive_seed_range(env)
     print("metadrive_start_index:", start_index)
     print("metadrive_num_scenarios:", num_scenarios)
