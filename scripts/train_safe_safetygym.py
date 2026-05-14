@@ -180,6 +180,8 @@ if __name__=='__main__':
             buf.append(exp)
             buf=buf[-1_000_000:]
             obs=next_obs
+            exec_action_for_metrics = info.get("exec_action", None)
+            exec_action_abs_max = float(np.max(np.abs(exec_action_for_metrics))) if exec_action_for_metrics is not None else 0.0
             row={
                 "step": step,
                 "reward": float(reward),
@@ -189,8 +191,8 @@ if __name__=='__main__':
                 "projection_cost": safe_info_float(info, "projection_cost", 0.0),
                 "raw_action_norm": safe_info_float(info, "raw_action_norm", 0.0),
                 "exec_action_norm": safe_info_float(info, "exec_action_norm", 0.0),
-                "raw_action_abs_max": safe_info_float(info, "raw_action_abs_max", 0.0),
-                "exec_action_abs_max": safe_info_float(info, "exec_action_abs_max", 0.0),
+                "raw_action_abs_max": float(np.max(np.abs(raw))),
+                "exec_action_abs_max": exec_action_abs_max,
                 "safe_candidate_ratio": safe_info_float(info, "safe_candidate_ratio", np.nan),
                 "emergency_active": safe_info_float(info, "emergency_active", 0.0),
                 "gt_known": safe_info_float(info, "gt_known", np.nan),
