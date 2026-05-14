@@ -1,0 +1,238 @@
+from dataclasses import dataclass
+import inspect
+import time
+import numpy as np
+
+
+@dataclass
+class CBFBuiltinFilterConfig:
+    dt: float = 0.1
+    horizon: int = 10
+    wheelbase: float = 2.5
+    obstacle_radius: float = 1.35
+    safe_distance: float = 1.35
+    steer_limit: float = 0.7
+    throttle_limit: float = 0.8
+    brake_limit: float = -0.8
+    max_steer_angle: float = 0.25
+    max_dsteer: float = 0.20
+    max_daccel: float = 0.30
+    cbf_activation_distance: float = 20.0
+    ttc_activation_threshold: float = 5.0
+    min_closing_speed: float = 0.05
+    cbf_h_margin: float = 0.0
+    cbf_min_margin: float = 0.0
+    require_approaching: bool = True
+    builtin_policy_name: str = "idm"
+    builtin_action_scale: float = 1.0
+    blend_with_raw: float = 0.0
+    correction_min_throttle: float = 0.0
+    preserve_raw_accel_if_positive: bool = False
+    enable_rate_limit: bool = True
+    debug: bool = False
+
+
+class MetaDriveBuiltinPolicyAdapter:
+    def __init__(self, policy_name: str = "idm"):
+        self.policy_name = policy_name
+        self.policy = None
+        self.policy_status = "not_initialized"
+
+    def reset(self):
+        self.policy = None
+        self.policy_status = "reset"
+
+    def _get_vehicle(self, env):
+        u = getattr(env, "unwrapped", env)
+        return getattr(u, "vehicle", None) or getattr(u, "agent", None)
+
+    def _build_policy(self, env):
+        if self.policy_name == "fallback_lane":
+            self.policy_status = "fallback_lane_following"
+            return
+        modules = {
+            "idm": ("metadrive.policy.idm_policy", "IDMPolicy"),
+            "lane_change": ("metadrive.policy.lane_change_policy", "LaneChangePolicy"),
+            "trajectory_idm": ("metadrive.policy.trajectory_idm_policy", "TrajectoryIDMPolicy"),
+            "expert": ("metadrive.policy.expert_policy", "ExpertPolicy"),
+        }
+        mod_name, cls_name = modules.get(self.policy_name, modules["idm"])
+        try:
+            mod = __import__(mod_name, fromlist=[cls_name, "PPOExpertPolicy"])
+            cls = getattr(mod, cls_name, None) or getattr(mod, "PPOExpertPolicy", None)
+            if cls is None:
+                raise RuntimeError("policy class missing")
+            veh = self._get_vehicle(env)
+            sig = inspect.signature(cls)
+            kwargs = {}
+            if "control_object" in sig.parameters:
+                kwargs["control_object"] = veh
+            elif "vehicle" in sig.parameters:
+                kwargs["vehicle"] = veh
+            elif "obj" in sig.parameters:
+                kwargs["obj"] = veh
+            try:
+                self.policy = cls(**kwargs) if kwargs else cls(veh)
+            except Exception:
+                self.policy = cls()
+            self.policy_status = "builtin_constructed"
+        except Exception as e:
+            self.policy = None
+            self.policy_status = f"build_failed:{e}"
+
+    def _fallback_lane_follow(self, env):
+        veh = self._get_vehicle(env)
+        steer, throttle = 0.0, 0.25
+        try:
+            lane = getattr(veh, "lane", None) or getattr(getattr(veh, "navigation", None), "current_lane", None)
+            pos = np.asarray(getattr(veh, "position", [0.0, 0.0]), dtype=np.float32)
+            yaw = float(getattr(veh, "heading_theta", 0.0))
+            speed = float(getattr(veh, "speed", 0.0))
+            if lane is not None and hasattr(lane, "local_coordinates") and hasattr(lane, "position"):
+                lon, lat = lane.local_coordinates(pos)
+                target = lane.position(lon + 6.0, 0.0)
+                desired = np.arctan2(target[1] - pos[1], target[0] - pos[0])
+                he = np.arctan2(np.sin(desired - yaw), np.cos(desired - yaw))
+                steer = np.clip(0.9 * he - 0.25 * lat, -0.7, 0.7)
+            throttle = np.clip(0.35 * (4.0 - speed), -0.2, 0.45)
+        except Exception:
+            pass
+        return np.array([steer, throttle], dtype=np.float32)
+
+    def act(self, env):
+        if self.policy is None and self.policy_name != "fallback_lane":
+            self._build_policy(env)
+        if self.policy is not None:
+            try:
+                for args in [(), (env,), (self._get_vehicle(env),)]:
+                    try:
+                        act = self.policy.act(*args)
+                        return np.clip(np.asarray(act, dtype=np.float32).reshape(2), -1.0, 1.0), 1.0, self.policy_status
+                    except TypeError:
+                        continue
+            except Exception:
+                pass
+        return np.clip(self._fallback_lane_follow(env), -1.0, 1.0), 0.0, "fallback_lane_following"
+
+
+class CBFBuiltinSafetyFilter:
+    def __init__(self, cfg: CBFBuiltinFilterConfig):
+        self.cfg = cfg
+        self.prev_exec_action = np.zeros(2, dtype=np.float32)
+        self.adapter = MetaDriveBuiltinPolicyAdapter(cfg.builtin_policy_name)
+
+    def reset(self):
+        self.prev_exec_action[:] = 0.0
+        self.adapter.reset()
+
+    def _box_rate(self, action, prev):
+        a = np.asarray(action, dtype=np.float32).copy()
+        a[0] = np.clip(a[0], -self.cfg.steer_limit, self.cfg.steer_limit)
+        a[1] = np.clip(a[1], self.cfg.brake_limit, self.cfg.throttle_limit)
+        d = np.clip(a - prev, [-self.cfg.max_dsteer, -self.cfg.max_daccel], [self.cfg.max_dsteer, self.cfg.max_daccel])
+        return np.clip(prev + d, -1.0, 1.0)
+
+    def _extract_ego_state(self, env):
+        u = getattr(env, "unwrapped", env)
+        v = getattr(u, "vehicle", None) or getattr(u, "agent", None)
+        pos = np.asarray(getattr(v, "position", [0.0, 0.0]), dtype=np.float32)
+        yaw = float(getattr(v, "heading_theta", getattr(v, "heading", 0.0)))
+        spd = float(getattr(v, "speed", np.linalg.norm(getattr(v, "velocity", [0.0, 0.0]))))
+        return np.array([pos[0], pos[1], yaw, spd], dtype=np.float32), v
+
+    def _extract_obstacles(self, env, ego_obj, ego_xy):
+        obs = []
+        u = getattr(env, "unwrapped", env)
+        cands = []
+        pk = getattr(u, "_parked_obj", None)
+        if pk is not None:
+            cands.append(pk)
+        tm = getattr(u, "traffic_manager", None)
+        if tm is not None and hasattr(tm, "vehicles"):
+            cands += list(getattr(tm, "vehicles", {}).values())
+        for o in cands:
+            if o is None or o is ego_obj:
+                continue
+            pos = np.asarray(getattr(o, "position", [0.0, 0.0]), dtype=np.float32)
+            yaw = float(getattr(o, "heading_theta", getattr(o, "heading", 0.0)))
+            speed = float(getattr(o, "speed", np.linalg.norm(getattr(o, "velocity", [0.0, 0.0]))))
+            d = float(np.linalg.norm(pos - ego_xy))
+            obs.append((d, np.array([pos[0], pos[1], yaw, speed], dtype=np.float32)))
+        if not obs:
+            return None, np.inf
+        obs.sort(key=lambda t: t[0])
+        return obs[0][1], obs[0][0]
+
+    def evaluate_raw_cbf(self, raw_action, ego, obstacle):
+        H, dt = self.cfg.horizon, self.cfg.dt
+        R = self.cfg.obstacle_radius + self.cfg.safe_distance
+        x, y, yaw, v = map(float, ego)
+        steer = float(np.clip(raw_action[0] / max(self.cfg.steer_limit, 1e-6) * self.cfg.max_steer_angle, -self.cfg.max_steer_angle, self.cfg.max_steer_angle))
+        accel = float(raw_action[1])
+        ox, oy, oyaw, ov = map(float, obstacle)
+        vox, voy = ov * np.cos(oyaw), ov * np.sin(oyaw)
+        ex0, ey0 = ox - x, oy - y
+        evx0, evy0 = v * np.cos(yaw) - vox, v * np.sin(yaw) - voy
+        sign_s = 1.0 if ex0 * evy0 - ey0 * evx0 > 0 else -1.0
+        min_d = min_ttc = h_min = cbf_min = np.inf
+        pred_col = 0.0
+        hk_prev = None
+        closing_speed = 0.0
+        for k in range(H + 1):
+            ex, ey = ox - x, oy - y
+            evx, evy = v * np.cos(yaw) - vox, v * np.sin(yaw) - voy
+            dist = np.sqrt(ex * ex + ey * ey)
+            dot = ex * evx + ey * evy
+            min_d = min(min_d, dist)
+            closing_speed = max(closing_speed, max(dot / max(dist, 1e-6), 0.0))
+            if closing_speed > 1e-6:
+                min_ttc = min(min_ttc, max(dist - R, 0.0) / max(closing_speed, 1e-6))
+            h = sign_s * (ex * evy - ey * evx) - R * np.sqrt(evx * evx + evy * evy)
+            h_min = min(h_min, h)
+            if hk_prev is not None:
+                cbf_min = min(cbf_min, h - hk_prev + 0.5 * hk_prev)
+            hk_prev = h
+            if dist < R:
+                pred_col = 1.0
+            if k < H:
+                yaw += dt * v * np.tan(steer) / max(self.cfg.wheelbase, 1e-6)
+                v = max(0.0, v + 3.0 * accel * dt)
+                x += dt * v * np.cos(yaw)
+                y += dt * v * np.sin(yaw)
+        cbf_min = float(cbf_min if np.isfinite(cbf_min) else h_min)
+        return dict(min_dist=float(min_d), min_ttc=float(min_ttc), h_min=float(h_min), cbf_min=cbf_min, predicted_collision=pred_col, cbf_violation=float((h_min < self.cfg.cbf_h_margin) or (cbf_min < self.cfg.cbf_min_margin)), closing_speed=float(closing_speed))
+
+    def project(self, raw_action, env=None, prev_exec_action=None):
+        t0 = time.perf_counter()
+        raw = np.asarray(raw_action, dtype=np.float32).reshape(2)
+        prev = self.prev_exec_action if prev_exec_action is None else np.asarray(prev_exec_action, dtype=np.float32)
+        ego, ego_obj = self._extract_ego_state(env)
+        obs, obs_d = self._extract_obstacles(env, ego_obj, ego[:2])
+        safe, cbf_active = True, False
+        eval_info = dict(min_dist=np.inf, min_ttc=np.inf, h_min=np.inf, cbf_min=np.inf, cbf_violation=0.0, predicted_collision=0.0, closing_speed=0.0)
+        if obs is not None:
+            eval_info = self.evaluate_raw_cbf(raw, ego, obs)
+            cbf_active = (obs_d <= self.cfg.cbf_activation_distance)
+            approaching = eval_info["closing_speed"] > self.cfg.min_closing_speed
+            ttc_ok = (eval_info["min_ttc"] > self.cfg.ttc_activation_threshold) or (not self.cfg.require_approaching) or (not approaching)
+            safe = (eval_info["predicted_collision"] == 0.0 and eval_info["min_dist"] > (self.cfg.obstacle_radius + self.cfg.safe_distance) and ((eval_info["cbf_violation"] == 0.0) or (not cbf_active)) and ttc_ok)
+        builtin_action, success, status = self.adapter.act(env)
+        builtin_action = np.clip(self.cfg.builtin_action_scale * builtin_action, -1.0, 1.0)
+        if self.cfg.preserve_raw_accel_if_positive and raw[1] > 0:
+            builtin_action[1] = max(builtin_action[1], raw[1])
+        builtin_action[1] = max(builtin_action[1], self.cfg.correction_min_throttle)
+        if self.cfg.blend_with_raw > 0:
+            builtin_action = (1 - self.cfg.blend_with_raw) * builtin_action + self.cfg.blend_with_raw * raw
+        exec_action = raw if safe else builtin_action
+        if self.cfg.enable_rate_limit:
+            exec_action = self._box_rate(exec_action, prev)
+        self.prev_exec_action = np.asarray(exec_action, dtype=np.float32).copy()
+        diff = exec_action - raw
+        info = dict(
+            cbf_safe=float(safe), cbf_active=float(cbf_active), cbf_violation=float(eval_info["cbf_violation"]), predicted_collision=float(eval_info["predicted_collision"]),
+            min_pred_dist=float(eval_info["min_dist"]), min_pred_ttc=float(eval_info["min_ttc"]), min_pred_h_cbf=float(eval_info["h_min"]), min_pred_cbf=float(eval_info["cbf_min"]),
+            obstacle_distance=float(obs_d), closing_speed=float(eval_info["closing_speed"]), raw_action=raw.copy(), builtin_action=np.asarray(builtin_action, dtype=np.float32).copy(), exec_action=np.asarray(exec_action, dtype=np.float32).copy(),
+            projection_residual=float(np.linalg.norm(diff)), projection_cost=float(np.sum(diff ** 2)), filter_active=float(not safe), selected_candidate_type=("raw_safe" if safe else "builtin_correction"), builtin_policy_name=self.cfg.builtin_policy_name,
+            builtin_policy_success=float(success), builtin_policy_status=status, fallback=float(success < 0.5), filter_time_ms=float((time.perf_counter() - t0) * 1000.0)
+        )
+        return exec_action, info
