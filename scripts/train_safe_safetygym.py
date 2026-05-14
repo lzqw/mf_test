@@ -14,7 +14,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from envs.safety_gym_safe_wrapper import SafeSafetyGymWrapper
-from relax.algorithm.safe_pullback_rf2_sac_ent import SafePullbackRF2SACENT
+from relax.algorithm.safe_pullback_rf2_sac_ent_safetygym import SafePullbackRF2SACENTSafetyGym
 from relax.network.safe_pullback_rf2_sac_ent import create_safe_pullback_rf2_sac_ent_net
 from scripts.safe_pullback_experience import SafePullbackExperience
 
@@ -28,7 +28,12 @@ def sample_batch(buf,b):
 def make_algo(args, obs_dim, act_dim):
     key=jax.random.PRNGKey(args.seed)
     net, params = create_safe_pullback_rf2_sac_ent_net(key, obs_dim, act_dim, hidden_sizes=[256]*3, diffusion_hidden_sizes=[256]*3, num_timesteps=args.diffusion_steps, num_ent_timesteps=args.num_ent_timesteps, alpha_value=args.alpha_value, fixed_alpha=args.fixed_alpha, init_alpha=args.init_alpha, noise_scale=args.policy_noise_scale)
-    return SafePullbackRF2SACENT(net, params, gamma=args.gamma, gamma_p=args.gamma_p, lr=args.lr, alpha_lr=args.alpha_lr, sample_k=args.sample_k, lambda_p=args.lambda_p, use_projection_critic=args.use_projection_critic, fixed_alpha=args.fixed_alpha, alpha_value=args.alpha_value, lambda_p_warmup_steps=args.lambda_p_warmup_steps, use_tn_energy=args.use_tn_energy, entropy_reg_mode=args.entropy_reg_mode)
+    return SafePullbackRF2SACENTSafetyGym(net, params, gamma=args.gamma, gamma_p=args.gamma_p, lr=args.lr, alpha_lr=args.alpha_lr, sample_k=args.sample_k, lambda_p=args.lambda_p, use_projection_critic=args.use_projection_critic, fixed_alpha=args.fixed_alpha, alpha_value=args.alpha_value, lambda_p_warmup_steps=args.lambda_p_warmup_steps, use_tn_energy=args.use_tn_energy, entropy_reg_mode=args.entropy_reg_mode)
+
+def safe_nanmean(xs):
+    arr=np.asarray(xs,dtype=np.float32)
+    finite=arr[np.isfinite(arr)]
+    return float(np.mean(finite)) if finite.size else np.nan
 
 def eval_agent(agent, args, env):
     ms=[]
@@ -38,8 +43,8 @@ def eval_agent(agent, args, env):
             a=np.asarray(agent.get_action(jax.random.PRNGKey(args.seed+ep*10000+l),obs[None])[0]); obs,r,t,tr,info=env.step(a); done=t or tr; ret+=float(r); l+=1
             costs.append(float(info.get('cost',0))); fars.append(float(info.get('filter_active',0))); aprs.append(float(info.get('projection_residual',0))); rns.append(float(info.get('raw_action_norm',0))); ens.append(float(info.get('exec_action_norm',0))); mins.append(float(info.get('min_h',np.nan))); cbfs.append(float(info.get('cbf_violation',0))); sv.append(float(info.get('safety_violation',0))); cv.append(float(info.get('constraint_violation',0)))
         success=float(info.get('is_success', info.get('success', info.get('goal_met', info.get('task_success', 0.0)))))
-        ms.append(dict(return_=ret, episode_length=l, success_rate=success, cost_return=float(np.sum(costs)), cost_rate=float(np.mean(np.array(costs)>0)) if costs else 0.0, safety_violation_rate=float(np.mean(sv)) if sv else 0.0, constraint_violation_rate=float(np.mean(cv)) if cv else 0.0, FAR=float(np.mean(fars)) if fars else 0.0, APR=float(np.mean(aprs)) if aprs else 0.0, projection_cost=float(np.mean(np.square(aprs))) if aprs else 0.0, raw_action_norm=float(np.mean(rns)) if rns else 0.0, exec_action_norm=float(np.mean(ens)) if ens else 0.0, min_h=float(np.nanmean(mins)) if mins else np.nan, cbf_violation_rate=float(np.mean(cbfs)) if cbfs else 0.0))
-    out={k:float(np.nanmean([m[k] for m in ms])) for k in ms[0].keys()}
+        ms.append(dict(return_=ret, episode_length=l, success_rate=success, cost_return=float(np.sum(costs)), cost_rate=float(np.mean(np.array(costs)>0)) if costs else 0.0, safety_violation_rate=float(np.mean(sv)) if sv else 0.0, constraint_violation_rate=float(np.mean(cv)) if cv else 0.0, FAR=float(np.mean(fars)) if fars else 0.0, APR=float(np.mean(aprs)) if aprs else 0.0, projection_cost=float(np.mean(np.square(aprs))) if aprs else 0.0, raw_action_norm=float(np.mean(rns)) if rns else 0.0, exec_action_norm=float(np.mean(ens)) if ens else 0.0, min_h=safe_nanmean(mins) if mins else np.nan, cbf_violation_rate=float(np.mean(cbfs)) if cbfs else 0.0))
+    out={k:safe_nanmean([m[k] for m in ms]) for k in ms[0].keys()}
     out['safety_score']=out['cost_return']+10.0*out['safety_violation_rate']+out['FAR']+0.1*out['APR']
     return out
 
@@ -55,7 +60,16 @@ if __name__=='__main__':
     obs,_=env.reset(seed=args.seed); agent=make_algo(args,env.observation_space.shape[0],env.action_space.shape[0]); key=jax.random.PRNGKey(args.seed+7); buf=[]; train=[]; ev=[]; best={'return_':(-1e18,'best_return_checkpoint.pkl',max),'cost_return':(1e18,'best_cost_checkpoint.pkl',min),'success_rate':(-1e18,'best_success_checkpoint.pkl',max),'safety_score':(1e18,'best_safety_checkpoint.pkl',min)}
     start=time.perf_counter(); pbar=tqdm(range(1,args.total_steps+1))
     for step in pbar:
-        raw=env.action_space.sample() if step<args.start_steps else np.asarray(agent.get_action(jax.random.split(key)[0],obs[None])[0]); next_obs,reward,term,trunc,info=env.step(raw); exp=SafePullbackExperience.create(obs,raw,info['exec_action'],reward,term,trunc,next_obs,info); buf.append(exp); buf=buf[-1_000_000:]; obs=next_obs
+        if step<args.start_steps:
+            raw=env.action_space.sample()
+        else:
+            key,ak=jax.random.split(key)
+            raw=np.asarray(agent.get_action(ak,obs[None])[0])
+        next_obs,reward,term,trunc,info=env.step(raw)
+        exp=SafePullbackExperience.create(obs,raw,info['exec_action'],reward,term,trunc,next_obs,info)
+        buf.append(exp)
+        buf=buf[-1_000_000:]
+        obs=next_obs
         if term or trunc: obs,_=env.reset()
         for k,v in info.items():
             if np.isscalar(v) and np.isfinite(float(v)): writer.add_scalar(f'train_env_info/{k}',float(v),step)
@@ -67,9 +81,9 @@ if __name__=='__main__':
             for mk,(bv,name,fn) in list(best.items()):
                 if fn(mk in m and m[mk] or bv,bv)!=(bv):
                     pass
-            if m['return_']>best['return_'][0]: best['return_']=(m['return_'],'best_return_checkpoint.pkl',max); pickle.dump(agent.state,open(log/'best_return_checkpoint.pkl','wb'))
-            if m['cost_return']<best['cost_return'][0]: best['cost_return']=(m['cost_return'],'best_cost_checkpoint.pkl',min); pickle.dump(agent.state,open(log/'best_cost_checkpoint.pkl','wb'))
-            if m['success_rate']>best['success_rate'][0]: best['success_rate']=(m['success_rate'],'best_success_checkpoint.pkl',max); pickle.dump(agent.state,open(log/'best_success_checkpoint.pkl','wb'))
-            if m['safety_score']<best['safety_score'][0]: best['safety_score']=(m['safety_score'],'best_safety_checkpoint.pkl',min); pickle.dump(agent.state,open(log/'best_safety_checkpoint.pkl','wb'))
+            if np.isfinite(m['return_']) and m['return_']>best['return_'][0]: best['return_']=(m['return_'],'best_return_checkpoint.pkl',max); pickle.dump(agent.state,open(log/'best_return_checkpoint.pkl','wb'))
+            if np.isfinite(m['cost_return']) and m['cost_return']<best['cost_return'][0]: best['cost_return']=(m['cost_return'],'best_cost_checkpoint.pkl',min); pickle.dump(agent.state,open(log/'best_cost_checkpoint.pkl','wb'))
+            if np.isfinite(m['success_rate']) and m['success_rate']>best['success_rate'][0]: best['success_rate']=(m['success_rate'],'best_success_checkpoint.pkl',max); pickle.dump(agent.state,open(log/'best_success_checkpoint.pkl','wb'))
+            if np.isfinite(m['safety_score']) and m['safety_score']<best['safety_score'][0]: best['safety_score']=(m['safety_score'],'best_safety_checkpoint.pkl',min); pickle.dump(agent.state,open(log/'best_safety_checkpoint.pkl','wb'))
         pbar.set_postfix(r=f"{reward:.2f}",cost=f"{info.get('cost',0):.2f}",FAR=f"{info.get('filter_active',0):.2f}",APR=f"{info.get('projection_residual',0):.3f}",raw_norm=f"{info.get('raw_action_norm',0):.2f}",exec_norm=f"{info.get('exec_action_norm',0):.2f}",eval_ret=f"{(ev[-1]['return_'] if ev else np.nan):.1f}",eval_cost=f"{(ev[-1]['cost_return'] if ev else np.nan):.2f}",succ=f"{(ev[-1]['success_rate'] if ev else 0):.2f}",sps=f"{step/(time.perf_counter()-start):.1f}")
     pickle.dump(train,open(log/'train_metrics.pkl','wb')); pickle.dump(ev,open(log/'eval_metrics.pkl','wb')); pickle.dump(agent.state,open(log/'checkpoint.pkl','wb'))
