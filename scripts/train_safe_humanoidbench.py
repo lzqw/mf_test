@@ -37,7 +37,9 @@ def make_algo(args, obs_dim, act_dim):
         entropy_reg_mode=args.entropy_reg_mode, candidate_temp=args.candidate_temp, beta_normal_entropy=args.beta_normal_entropy,
         min_effective_entropy=args.min_effective_entropy, target_effective_entropy=args.target_effective_entropy,
         normal_energy_coef=args.normal_energy_coef, weight_mix=args.weight_mix, residual_radius=args.residual_radius, action_limit=1.0,
-        use_goal_candidate=args.use_goal_candidate, high_level_max_delta=args.max_delta)
+        use_goal_candidate=args.use_goal_candidate, high_level_max_delta=args.max_delta,
+        policy_score_mode=args.policy_score_mode, compat_tau=args.compat_tau, compat_mu=args.compat_mu,
+        compat_lambda_f=args.compat_lambda_f, trigger_threshold=args.trigger_threshold)
 
 def is_finite_number(x):
     try: return np.isfinite(float(x))
@@ -107,6 +109,12 @@ def main():
     p.add_argument('--policy_path',type=str,default=None); p.add_argument('--mean_path',type=str,default=None); p.add_argument('--var_path',type=str,default=None); p.add_argument('--policy_type',type=str,default=None)
     p.add_argument("--blocked_hands", type=str, default=None); p.add_argument("--small_obs", type=str, default=None); p.add_argument("--augment_reach_obs", action="store_true"); p.add_argument("--use_goal_candidate", action="store_true")
     p.add_argument("--reference_filter_mode", type=str, default="none", choices=["none", "goal"]); p.add_argument("--reference_filter_threshold", type=float, default=0.25); p.add_argument("--reference_filter_type", type=str, default="replace", choices=["replace", "ball"])
+    p.add_argument("--policy_score_mode", type=str, default="linear_penalty",
+               choices=["linear_penalty", "hard_region", "compat_gate"])
+    p.add_argument("--compat_tau", type=float, default=0.5)
+    p.add_argument("--compat_mu", type=float, default=1.0)
+    p.add_argument("--compat_lambda_f", type=float, default=2.0)
+    p.add_argument("--trigger_threshold", type=float, default=0.25)
     p.add_argument("--num_envs", type=int, default=1); p.add_argument("--updates_per_step", type=int, default=1)
     args=p.parse_args(); np.random.seed(args.seed)
     log=Path(args.log_dir); log.mkdir(parents=True,exist_ok=True); writer=SummaryWriter(str(log/'tb')); (log/'args.json').write_text(json.dumps(vars(args),indent=2,sort_keys=True))
