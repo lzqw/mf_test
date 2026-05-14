@@ -35,6 +35,20 @@ class MPCVehicleCBFConfig:
     disable_mpc_brake: bool = True
     min_forward_accel_when_mpc_active: float = 0.0
     mpc_failed_keep_raw_accel: bool = True
+    lane_tracking_weight: float = 0.5
+    heading_tracking_weight: float = 0.8
+    steer_weight: float = 0.01
+    steer_smooth_weight: float = 0.01
+    alpha_weight: float = 5.0
+    alpha_min: float = 0.25
+    cbf_hinge_weight: float = 10.0
+    cbf_terminal_hinge_weight: float = 30.0
+    cbf_h_margin: float = 0.0
+    enable_turn_bias_cost: bool = True
+    turn_bias_weight: float = 2.0
+    turn_bias_angle: float = 0.10
+    turn_bias_steps: int = 5
+    turn_bias_decay: float = 0.9
 
 
 class MPCVehicleCBFSafetyFilter:
@@ -145,8 +159,22 @@ class MPCVehicleCBFSafetyFilter:
         return dict(h_min=float(h_min), cbf_min=float(cbf_min if np.isfinite(cbf_min) else h_min), min_dist=float(min_d), min_ttc=float(min_ttc), cbf_violation=float((h_min < 0.0) or (cbf_min < 0.0)), predicted_collision=float(predicted_collision), sign_s=float(sign_s), vox=float(vox), voy=float(voy))
 
     def _mpc_solve(self, ref, ego, obstacle_points, vox, voy, v_ego, sign_s, enable_cbf):
+        diag = dict(
+            raw_mpc_steer_angle=0.0,
+            alpha_min=1.0,
+            alpha_min_bound=float(self.cfg.alpha_min),
+            turn_bias_ref0=float(sign_s * self.cfg.turn_bias_angle) if enable_cbf and self.cfg.enable_turn_bias_cost else 0.0,
+            turn_bias_weight=float(self.cfg.turn_bias_weight),
+            cbf_hinge_weight=float(self.cfg.cbf_hinge_weight),
+            cbf_terminal_hinge_weight=float(self.cfg.cbf_terminal_hinge_weight),
+            lane_tracking_weight=float(self.cfg.lane_tracking_weight),
+            heading_tracking_weight=float(self.cfg.heading_tracking_weight),
+            steer_weight=float(self.cfg.steer_weight),
+            steer_smooth_weight=float(self.cfg.steer_smooth_weight),
+            alpha_weight=float(self.cfg.alpha_weight),
+        )
         if ca is None:
-            return False, "casadi_unavailable", 0.0, 1.0
+            return False, "casadi_unavailable", 0.0, 1.0, diag
         N = self.cfg.horizon
         dt = self.cfg.dt
         R = self.cfg.obstacle_radius + self.cfg.safe_distance
@@ -161,9 +189,12 @@ class MPCVehicleCBFSafetyFilter:
             g += [yaw[k + 1] - (yaw[k] + dt * v_ego * ca.tan(u_th[k]) / self.cfg.wheelbase)]
             lat_err = y[k] - ref[1]
             head_err = ca.atan2(ca.sin(yaw[k] - ref[2]), ca.cos(yaw[k] - ref[2]))
-            cost += 4.0 * lat_err * lat_err + 1.0 * head_err * head_err + 0.2 * u_th[k] * u_th[k] + 0.05 * (1 - u_al[k]) * (1 - u_al[k])
+            cost += self.cfg.lane_tracking_weight * lat_err * lat_err
+            cost += self.cfg.heading_tracking_weight * head_err * head_err
+            cost += self.cfg.steer_weight * u_th[k] * u_th[k]
+            cost += self.cfg.alpha_weight * (1 - u_al[k]) * (1 - u_al[k])
             if k > 0:
-                cost += 0.2 * (u_th[k] - u_th[k - 1]) ** 2
+                cost += self.cfg.steer_smooth_weight * (u_th[k] - u_th[k - 1]) ** 2
             ex = obstacle_points[k, 0] - x[k]; ey = obstacle_points[k, 1] - y[k]
             exn = obstacle_points[k + 1, 0] - x[k + 1]; eyn = obstacle_points[k + 1, 1] - y[k + 1]
             evx = v_ego * ca.cos(yaw[k]) - vox; evy = v_ego * ca.sin(yaw[k]) - voy
@@ -172,10 +203,23 @@ class MPCVehicleCBFSafetyFilter:
             hkn = sign_s * (exn * evyn - eyn * evxn) - R * ca.sqrt(evxn * evxn + evyn * evyn + 1e-6)
             dot = ex * evx + ey * evy
             if enable_cbf:
+                h_deficit = ca.if_else(hk < self.cfg.cbf_h_margin, self.cfg.cbf_h_margin - hk, 0.0)
+                h_next_deficit = ca.if_else(hkn < self.cfg.cbf_h_margin, self.cfg.cbf_h_margin - hkn, 0.0)
+                cost += self.cfg.cbf_hinge_weight * h_deficit * h_deficit
+                cost += 0.5 * self.cfg.cbf_hinge_weight * h_next_deficit * h_next_deficit
+                if self.cfg.enable_turn_bias_cost and k < self.cfg.turn_bias_steps:
+                    u_ref = sign_s * self.cfg.turn_bias_angle * (self.cfg.turn_bias_decay ** k)
+                    cost += self.cfg.turn_bias_weight * (u_th[k] - u_ref) ** 2
                 cbf = ca.if_else(dot > 0, hkn - hk + u_al[k] * hk, 1.0)
                 g += [cbf]
+        if enable_cbf:
+            exN = obstacle_points[N, 0] - x[N]; eyN = obstacle_points[N, 1] - y[N]
+            evxN = v_ego * ca.cos(yaw[N]) - vox; evyN = v_ego * ca.sin(yaw[N]) - voy
+            hN = sign_s * (exN * evyN - eyN * evxN) - R * ca.sqrt(evxN * evxN + evyN * evyN + 1e-6)
+            terminal_deficit = ca.if_else(hN < self.cfg.cbf_h_margin, self.cfg.cbf_h_margin - hN, 0.0)
+            cost += self.cfg.cbf_terminal_hinge_weight * terminal_deficit * terminal_deficit
         nxyz = 3 * (N + 1)
-        lbw = [-ca.inf] * nxyz + [-self.cfg.max_steer_angle] * N + [0.0] * N
+        lbw = [-ca.inf] * nxyz + [-self.cfg.max_steer_angle] * N + [self.cfg.alpha_min] * N
         ubw = [ca.inf] * nxyz + [self.cfg.max_steer_angle] * N + [1.0] * N
         lbg = [0.0] * (3 + 3 * N) + ([0.0] * N if enable_cbf else [])
         ubg = [0.0] * (3 + 3 * N) + ([ca.inf] * N if enable_cbf else [])
@@ -188,9 +232,11 @@ class MPCVehicleCBFSafetyFilter:
             wv = np.array(sol["x"]).reshape(-1)
             u0 = float(wv[3 * (N + 1)])
             al = wv[3 * (N + 1) + N:3 * (N + 1) + 2 * N]
-            return True, solver.stats().get("return_status", "success"), u0, float(np.min(al))
+            alpha_min = float(np.min(al))
+            diag.update(raw_mpc_steer_angle=float(u0), alpha_min=alpha_min)
+            return True, solver.stats().get("return_status", "success"), u0, alpha_min, diag
         except Exception as exc:
-            return False, str(exc), 0.0, 1.0
+            return False, str(exc), 0.0, 1.0, diag
 
     def project(self, raw_action, env=None, prev_exec_action=None):
         t0 = time.perf_counter()
@@ -218,7 +264,7 @@ class MPCVehicleCBFSafetyFilter:
                 info = dict(selected_candidate_type="raw", filter_active=0.0, mpc_success=1.0, mpc_status="raw_safe")
             else:
                 pts = np.stack([obs[:2] + i * self.cfg.dt * np.array([raw_eval["vox"], raw_eval["voy"]]) for i in range(self.cfg.horizon + 1)], axis=0)
-                ok, status, steer, alpha_min = self._mpc_solve(ref, ego, pts, raw_eval["vox"], raw_eval["voy"], ego[3], raw_eval["sign_s"], cbf_active)
+                ok, status, steer, alpha_min, mpc_diag = self._mpc_solve(ref, ego, pts, raw_eval["vox"], raw_eval["voy"], ego[3], raw_eval["sign_s"], cbf_active)
                 if ok:
                     nsteer = np.clip(steer / max(self.cfg.max_steer_angle, 1e-6) * self.cfg.steer_limit, -self.cfg.steer_limit, self.cfg.steer_limit)
                     if self.cfg.preserve_raw_accel:
@@ -237,6 +283,7 @@ class MPCVehicleCBFSafetyFilter:
                     mpc_accel_cmd = float(accel)
                     exec_action = self._box_rate([nsteer, accel], prev)
                     info = dict(selected_candidate_type="mpc_cbf", filter_active=1.0, mpc_success=1.0, mpc_status=status, mpc_steer=float(nsteer), mpc_alpha_min=float(alpha_min), fallback=0.0, no_safe_candidate=0.0)
+                    info.update(mpc_diag)
                 else:
                     steer_fb = np.clip(0.2 * np.sin(ref[2] - ego[2]), -self.cfg.steer_limit, self.cfg.steer_limit)
                     if self.cfg.mpc_failed_keep_raw_accel or self.cfg.disable_mpc_brake:
@@ -247,11 +294,12 @@ class MPCVehicleCBFSafetyFilter:
                     exec_action = self._box_rate([steer_fb, accel_fb], prev)
                     selected_candidate_type = "mpc_failed_steer_only" if (self.cfg.mpc_failed_keep_raw_accel or self.cfg.disable_mpc_brake) else "mpc_failed_brake"
                     info = dict(selected_candidate_type=selected_candidate_type, filter_active=1.0, mpc_success=0.0, mpc_status=status, mpc_steer=float(steer_fb), mpc_alpha_min=0.0, fallback=1.0, no_safe_candidate=1.0)
+                    info.update(mpc_diag)
             info.update(raw_eval)
         self.prev_exec_action = np.asarray(exec_action, dtype=np.float32).copy()
         diff = exec_action - raw
         min_ttc = float(info.get("min_ttc", np.inf))
         info["filter_active"] = float(np.linalg.norm(diff) > 1e-6)
         raw_accel_preserved = float(abs(float(mpc_accel_cmd) - float(raw[1])) < 1e-6)
-        info.update(dict(raw_action=raw, exec_action=exec_action, projection_residual=float(np.linalg.norm(diff)), projection_cost=float(np.sum(diff ** 2)), sample_filter_active=0.0, mpc_cbf_active=1.0, num_candidates=1, num_valid_candidates=1 if info.get("selected_candidate_type") == "raw" else 0, valid_candidate_ratio=float(1.0 if info.get("selected_candidate_type") == "raw" else 0.0), fallback=float(info.get("fallback", 0.0)), no_safe_candidate=float(info.get("no_safe_candidate", 0.0)), min_pred_dist=float(info.get("min_dist", np.inf)), min_pred_ttc=min_ttc, min_pred_h_cbf=float(info.get("h_min", np.inf)), min_pred_cbf=float(info.get("cbf_min", np.inf)), cbf_violation=float(info.get("cbf_violation", 0.0)), predicted_collision=float(info.get("predicted_collision", 0.0)), mpc_steer=float(info.get("mpc_steer", 0.0)), mpc_alpha_min=float(info.get("mpc_alpha_min", 1.0)), sign_s=float(info.get("sign_s", 1.0)), min_pred_h_vo=float(info.get("h_min", np.inf)), vo_violation=float(info.get("cbf_violation", 0.0)), ttc_violation=float(min_ttc < self.cfg.ttc_activation_threshold), lane_violation=0.0, preserve_raw_accel=float(self.cfg.preserve_raw_accel), disable_mpc_brake=float(self.cfg.disable_mpc_brake), raw_accel_preserved=raw_accel_preserved, accel_modified_by_mpc=float(1.0 - raw_accel_preserved), mpc_accel_cmd=float(mpc_accel_cmd), filter_time_ms=float((time.perf_counter() - t0) * 1000.0)))
+        info.update(dict(raw_action=raw, exec_action=exec_action, projection_residual=float(np.linalg.norm(diff)), projection_cost=float(np.sum(diff ** 2)), sample_filter_active=0.0, mpc_cbf_active=1.0, num_candidates=1, num_valid_candidates=1 if info.get("selected_candidate_type") == "raw" else 0, valid_candidate_ratio=float(1.0 if info.get("selected_candidate_type") == "raw" else 0.0), fallback=float(info.get("fallback", 0.0)), no_safe_candidate=float(info.get("no_safe_candidate", 0.0)), min_pred_dist=float(info.get("min_dist", np.inf)), min_pred_ttc=min_ttc, min_pred_h_cbf=float(info.get("h_min", np.inf)), min_pred_cbf=float(info.get("cbf_min", np.inf)), cbf_violation=float(info.get("cbf_violation", 0.0)), predicted_collision=float(info.get("predicted_collision", 0.0)), mpc_steer=float(info.get("mpc_steer", 0.0)), raw_mpc_steer_angle=float(info.get("raw_mpc_steer_angle", 0.0)), mpc_alpha_min=float(info.get("mpc_alpha_min", info.get("alpha_min", 1.0))), alpha_min_bound=float(info.get("alpha_min_bound", self.cfg.alpha_min)), turn_bias_ref0=float(info.get("turn_bias_ref0", 0.0)), turn_bias_weight=float(info.get("turn_bias_weight", self.cfg.turn_bias_weight)), cbf_hinge_weight=float(info.get("cbf_hinge_weight", self.cfg.cbf_hinge_weight)), cbf_terminal_hinge_weight=float(info.get("cbf_terminal_hinge_weight", self.cfg.cbf_terminal_hinge_weight)), lane_tracking_weight=float(info.get("lane_tracking_weight", self.cfg.lane_tracking_weight)), heading_tracking_weight=float(info.get("heading_tracking_weight", self.cfg.heading_tracking_weight)), steer_weight=float(info.get("steer_weight", self.cfg.steer_weight)), steer_smooth_weight=float(info.get("steer_smooth_weight", self.cfg.steer_smooth_weight)), alpha_weight=float(info.get("alpha_weight", self.cfg.alpha_weight)), sign_s=float(info.get("sign_s", 1.0)), min_pred_h_vo=float(info.get("h_min", np.inf)), vo_violation=float(info.get("cbf_violation", 0.0)), ttc_violation=float(min_ttc < self.cfg.ttc_activation_threshold), lane_violation=0.0, preserve_raw_accel=float(self.cfg.preserve_raw_accel), disable_mpc_brake=float(self.cfg.disable_mpc_brake), raw_accel_preserved=raw_accel_preserved, accel_modified_by_mpc=float(1.0 - raw_accel_preserved), mpc_accel_cmd=float(mpc_accel_cmd), filter_time_ms=float((time.perf_counter() - t0) * 1000.0)))
         return exec_action, info
