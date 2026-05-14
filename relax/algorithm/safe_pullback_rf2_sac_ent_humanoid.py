@@ -37,7 +37,9 @@ class SafePullbackRF2SACENTHumanoid(Algorithm):
                  beta_normal_entropy=1.0, min_effective_entropy=-20.0, target_effective_entropy=1.0,
                  normal_energy_coef=0.05, target_safe_energy=0.05,
                  safe_iso_coef=0.05, safe_energy_variant="normal_iso", weight_mix=0.05, residual_radius=0.35, action_limit=1.0,
-                 use_goal_candidate=False, high_level_max_delta=0.1):
+                 use_goal_candidate=False, high_level_max_delta=0.1,
+                 policy_score_mode="linear_penalty", compat_tau=0.5, compat_mu=1.0, compat_lambda_f=2.0,
+                 trigger_threshold=0.25):
         self.agent = agent
         self.gamma = gamma
         self.gamma_p = gamma_p
@@ -74,6 +76,11 @@ class SafePullbackRF2SACENTHumanoid(Algorithm):
         self.weight_mix = weight_mix
         self.use_goal_candidate = use_goal_candidate
         self.high_level_max_delta = high_level_max_delta
+        self.policy_score_mode = policy_score_mode
+        self.compat_tau = compat_tau
+        self.compat_mu = compat_mu
+        self.compat_lambda_f = compat_lambda_f
+        self.trigger_threshold = trigger_threshold
         self.optim = optax.adam(lr)
         self.policy_optim = optax.adam(lr)
         self.alpha_optim = optax.adam(alpha_lr)
@@ -271,14 +278,50 @@ class SafePullbackRF2SACENTHumanoid(Algorithm):
             noisy_rep = t * clean + (1.0 - t) * noise
             obs_rep = jnp.repeat(obs[:, None, :], self.K, axis=1)
 
-            exec_clean, _, projection_residual_candidates = project_action_jax_humanoid(clean, prior_action=None, residual_radius=self.residual_radius, action_limit=self.action_limit)
+            compat_mode = (act_dim == 3) and (obs.shape[-1] >= 9)
+            if compat_mode:
+                goal_minus_last_target = obs[..., -6:-3]
+                max_delta = jnp.maximum(jnp.float32(self.high_level_max_delta), 1e-6)
+                a_ref = jnp.clip(goal_minus_last_target / max_delta, -1.0, 1.0)
+                a_ref_rep = a_ref[:, None, :]
+                ref_diff = clean - a_ref_rep
+                ref_dist = jnp.linalg.norm(ref_diff, axis=-1)
+                trigger = ref_dist > jnp.float32(self.trigger_threshold)
+                exec_clean = jnp.where(trigger[..., None], a_ref_rep, clean)
+                projection_residual_candidates = jnp.linalg.norm(exec_clean - clean, axis=-1)
+                candidate_dS = projection_residual_candidates ** 2
+            else:
+                exec_clean, _, projection_residual_candidates = project_action_jax_humanoid(clean, prior_action=None, residual_radius=self.residual_radius, action_limit=self.action_limit)
+                candidate_dS = projection_residual_candidates ** 2
+                ref_dist = projection_residual_candidates
+                trigger = projection_residual_candidates > 1e-8
 
             q_reward = jnp.minimum(self.agent.q(p.q1, obs_rep, exec_clean), self.agent.q(p.q2, obs_rep, exec_clean))
             q_proj = self.agent.get_qp(p.qp, obs_rep, clean) if self.use_projection_critic else jnp.zeros_like(q_reward)
 
             warmup_steps = jnp.maximum(jnp.float32(self.lambda_p_warmup_steps), 1.0)
             lambda_eff = self.lambda_p * jnp.clip(jnp.float32(state.step) / warmup_steps, 0.0, 1.0)
-            score = jax.lax.stop_gradient(q_reward - lambda_eff * q_proj)
+
+            F = jnp.zeros_like(q_reward)
+            Ar = jnp.zeros_like(q_reward)
+            AF = jnp.zeros_like(q_reward)
+            if self.policy_score_mode == "linear_penalty":
+                score = q_reward - lambda_eff * q_proj
+            elif self.policy_score_mode == "hard_region":
+                q_r_adv = q_reward - jnp.mean(q_reward, axis=1, keepdims=True)
+                q_s_adv = q_proj - jnp.mean(q_proj, axis=1, keepdims=True)
+                score = jnp.where(trigger, -lambda_eff * q_s_adv, q_r_adv)
+            elif self.policy_score_mode == "compat_gate":
+                C = q_proj + jnp.float32(self.compat_mu) * jax.lax.stop_gradient(candidate_dS)
+                F = jnp.exp(-C / jnp.maximum(jnp.float32(self.compat_tau), 1e-6))
+                F = jnp.clip(F, 1e-6, 1.0)
+                Ar = q_reward - jnp.mean(q_reward, axis=1, keepdims=True)
+                AF = F - jnp.mean(F, axis=1, keepdims=True)
+                score = F * Ar + jnp.float32(self.compat_lambda_f) * AF
+            else:
+                score = q_reward - lambda_eff * q_proj
+
+            score = jax.lax.stop_gradient(score)
 
             candidate_temp = jnp.maximum(jnp.float32(self.candidate_temp), 1e-3)
             critic = score / candidate_temp
@@ -296,7 +339,7 @@ class SafePullbackRF2SACENTHumanoid(Algorithm):
             weight_entropy = -jnp.mean(jnp.sum(w * jnp.log(w + 1e-8), axis=1))
             top_weight_mean = jnp.mean(jnp.max(w, axis=1))
             far_batch = jnp.mean((projection_residual_candidates > 1e-8).astype(jnp.float32))
-            apr_batch = jnp.mean(projection_residual_candidates ** 2)
+            apr_batch = jnp.mean(candidate_dS)
 
             tn_energy = tn_normal_energy = tn_tangent_energy = tn_gate_mean = tn_residual_xt_mean = jnp.float32(0.0)
 
@@ -386,6 +429,18 @@ class SafePullbackRF2SACENTHumanoid(Algorithm):
                         lambda_eff=lambda_eff, FAR_batch=far_batch, APR_batch=apr_batch,
                         candidate_q_reward_mean=jnp.mean(q_reward),
                         candidate_q_projection_mean=jnp.mean(q_proj),
+                        candidate_trigger_rate=jnp.mean(trigger.astype(jnp.float32)),
+                        candidate_dS_mean=jnp.mean(candidate_dS),
+                        candidate_ref_dist_mean=jnp.mean(ref_dist),
+                        compat_F_mean=jnp.mean(F),
+                        compat_F_min=jnp.min(F),
+                        compat_Ar_mean=jnp.mean(Ar),
+                        compat_AF_mean=jnp.mean(AF),
+                        policy_score_mode_id=jnp.float32(
+                            0.0 if self.policy_score_mode == "linear_penalty"
+                            else 1.0 if self.policy_score_mode == "hard_region"
+                            else 2.0
+                        ),
                         projection_residual_candidate_mean=jnp.mean(projection_residual_candidates),
                         projection_residual_candidate_max=jnp.max(projection_residual_candidates),
                         weight_entropy=weight_entropy,
