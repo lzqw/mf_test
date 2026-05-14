@@ -19,6 +19,9 @@ class SafeHumanoidBenchWrapper(gym.Wrapper):
         var_path: str | None = None,
         policy_type: str | None = None,
         augment_reach_obs: bool = False,
+        reference_filter_mode: str = "none",
+        reference_filter_threshold: float = 0.25,
+        reference_filter_type: str = "replace",
         **env_kwargs,
     ):
         if policy_type is not None:
@@ -33,6 +36,9 @@ class SafeHumanoidBenchWrapper(gym.Wrapper):
         self.use_filter = use_filter
         self.augment_reach_obs = augment_reach_obs
         self.safe_filter = HumanoidSafeFilter(filter_cfg or HumanoidSafeFilterConfig())
+        self.reference_filter_mode = reference_filter_mode
+        self.reference_filter_threshold = reference_filter_threshold
+        self.reference_filter_type = reference_filter_type
         if self.augment_reach_obs and self.env.action_space.shape[-1] == 3:
             base_obs_space = self.env.observation_space
             self.observation_space = gym.spaces.Box(
@@ -71,6 +77,45 @@ class SafeHumanoidBenchWrapper(gym.Wrapper):
             return np.concatenate([np.asarray(obs, dtype=np.float32), extra], axis=0)
         except Exception:
             return obs
+
+
+    def _get_goal_reference_action(self, last_target):
+        base_task = self._get_base_task()
+        goal = np.asarray(base_task.goal, dtype=np.float32).reshape(3)
+        last_target = np.asarray(last_target, dtype=np.float32).reshape(3)
+        a_ref = (goal - last_target) / self.safe_filter.cfg.max_delta
+        a_ref = np.clip(a_ref, -1.0, 1.0).astype(np.float32)
+        return a_ref, goal
+
+    def _apply_reference_correction(self, raw_action, a_ref):
+        raw_action = np.asarray(raw_action, dtype=np.float32).reshape(3)
+        a_ref = np.asarray(a_ref, dtype=np.float32).reshape(3)
+
+        diff = raw_action - a_ref
+        dist = float(np.linalg.norm(diff))
+        threshold = float(self.reference_filter_threshold)
+
+        if self.reference_filter_mode != "goal" or dist <= threshold:
+            corrected = raw_action.copy()
+            active = 0.0
+        else:
+            active = 1.0
+
+            if self.reference_filter_type == "replace":
+                corrected = a_ref.copy()
+            elif self.reference_filter_type == "ball":
+                corrected = a_ref + diff * (threshold / (dist + 1e-6))
+            else:
+                raise ValueError(f"Unknown reference_filter_type: {self.reference_filter_type}")
+
+        return corrected.astype(np.float32), {
+            "reference_action": a_ref,
+            "reference_action_norm": float(np.linalg.norm(a_ref)),
+            "raw_to_reference_dist": dist,
+            "reference_correction_active": active,
+            "reference_corrected_action": corrected,
+            "reference_corrected_to_ref_dist": float(np.linalg.norm(corrected - a_ref)),
+        }
 
     def _get_safety_metrics(self) -> Dict[str, float]:
         out = dict(head_height=0.0, torso_upright=1.0, fall=0.0,
@@ -150,12 +195,31 @@ class SafeHumanoidBenchWrapper(gym.Wrapper):
             target_low = np.asarray(task.target_low, dtype=np.float32)
             target_high = np.asarray(task.target_high, dtype=np.float32)
             hand_pos = np.asarray(self.env.unwrapped.robot.left_hand_position(), dtype=np.float32)
-            return self.safe_filter.project_high_level_reach(
-                raw_action=raw_action,
+            action_for_filter = raw_action
+            ref_info = {}
+
+            if self.reference_filter_mode == "goal":
+                a_ref, _goal = self._get_goal_reference_action(last_target)
+                action_for_filter, ref_info = self._apply_reference_correction(raw_action, a_ref)
+
+            exec_action, filter_info = self.safe_filter.project_high_level_reach(
+                raw_action=action_for_filter,
                 last_target=last_target,
                 target_low=target_low,
                 target_high=target_high,
                 hand_pos=hand_pos,
             )
+
+            filter_info.update(ref_info)
+            filter_info["raw_action_before_reference"] = raw_action
+            filter_info["action_for_filter"] = action_for_filter
+
+            filter_info["total_projection_residual"] = float(np.linalg.norm(filter_info["exec_action"] - raw_action))
+            filter_info["total_projection_cost"] = float(np.sum((filter_info["exec_action"] - raw_action) ** 2))
+
+            if float(filter_info.get("reference_correction_active", 0.0)) > 0:
+                filter_info["filter_active"] = 1.0
+
+            return exec_action, filter_info
         except Exception:
             return self.safe_filter.project(raw_action)
