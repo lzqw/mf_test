@@ -56,6 +56,10 @@ def test_env(env_id, episodes, use_filter, filter_type, render_mode):
         obs, info = wenv.reset()
         for i in range(5):
             obs, reward, term, trunc, info = wenv.step(wenv.action_space.sample())
+            if filter_type in ["gt_shield", "sample_shield"] and i < 3:
+                print("[shield]", {k: info.get(k, np.nan) for k in ["gt_known", "ego_x", "ego_y", "num_hazards", "nearest_hazard_dist", "current_min_h", "predicted_min_h", "num_candidates", "num_safe_candidates", "safe_candidate_ratio", "emergency_active", "selected_candidate_type"]})
+                if not np.isfinite(float(info.get("num_hazards", np.nan))) or float(info.get("num_hazards", 0.0)) <= 0:
+                    print(f"[WARN] {env_id} has no hazard ground-truth extracted at step {i}")
             miss = [k for k in REQ_KEYS if k not in info]
             if miss:
                 print("[FAIL KEYS] missing:", miss)
