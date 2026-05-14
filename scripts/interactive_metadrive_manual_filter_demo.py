@@ -15,6 +15,7 @@ import numpy as np
 import relax.env.drive.lane_change  # noqa: F401
 from relax.safety.metadrive_filtered_manual_policy import build_default_filter_info, rate_filter
 from relax.safety.metadrive_sample_filter import SampleBasedVehicleSafetyFilter, SampleVehicleFilterConfig
+from relax.safety.metadrive_mpc_cbf_filter import MPCVehicleCBFSafetyFilter, MPCVehicleCBFConfig
 
 
 def make_status_panel(lines, width=860, height=420):
@@ -31,7 +32,7 @@ def make_status_panel(lines, width=860, height=420):
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--env_name", default="FlatThreeLaneStraight")
-    p.add_argument("--filter_type", default="sample_vo", choices=["none", "rate", "sample_vo"])
+    p.add_argument("--filter_type", default="sample_vo", choices=["none", "rate", "sample_vo", "mpc_cbf"])
     p.add_argument("--use_filter", action="store_true")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--num_local_samples", type=int, default=64)
@@ -150,7 +151,10 @@ def main():
         min_closing_speed=args.min_closing_speed,
         num_maneuver_samples=args.num_maneuver_samples,
     )
-    filt = SampleBasedVehicleSafetyFilter(cfg)
+    if args.filter_type == "mpc_cbf":
+        filt = MPCVehicleCBFSafetyFilter(MPCVehicleCBFConfig(dt=args.dt, horizon=args.horizon))
+    else:
+        filt = SampleBasedVehicleSafetyFilter(cfg)
 
     env = gym.make(
         args.env_name,
@@ -207,6 +211,12 @@ def main():
                 f"active_maneuver_type={filter_info.get('active_maneuver_type', None)}",
                 f"active_maneuver_steps_left={filter_info.get('active_maneuver_steps_left', 0)}",
                 f"low_speed_count={filter_info.get('low_speed_count', 0)}",
+                f"mpc_cbf_active={filter_info.get('mpc_cbf_active', 0):.1f}",
+                f"mpc_success={filter_info.get('mpc_success', 0)} status={filter_info.get('mpc_status', 'n/a')}",
+                f"min_pred_h_cbf={filter_info.get('min_pred_h_cbf', np.nan):.3f} min_pred_cbf={filter_info.get('min_pred_cbf', np.nan):.3f}",
+                f"cbf_violation={filter_info.get('cbf_violation', 0):.1f}",
+                f"mpc_steer={filter_info.get('mpc_steer', 0):.3f} mpc_alpha_min={filter_info.get('mpc_alpha_min', 0):.3f}",
+                f"sign_s={filter_info.get('sign_s', 0):.1f}",
                 f"filter_time_ms={filter_info.get('filter_time_ms', 0):.2f}",
                 f"speed={speed:.3f}",
                 f"crash={info.get('crash', 0)} cost={info.get('cost', 0)}",
