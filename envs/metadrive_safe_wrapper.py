@@ -5,6 +5,7 @@ import numpy as np
 import relax.env.drive.lane_change  # noqa: F401
 
 from relax.safety.metadrive_sample_filter import SampleBasedVehicleSafetyFilter, SampleVehicleFilterConfig
+from relax.safety.metadrive_mpc_cbf_filter import MPCVehicleCBFSafetyFilter, MPCVehicleCBFConfig
 
 
 class SafeMetaDriveSampleWrapper(gym.Wrapper):
@@ -14,7 +15,22 @@ class SafeMetaDriveSampleWrapper(gym.Wrapper):
         assert isinstance(self.action_space, gym.spaces.Box) and self.action_space.shape == (2,)
         self.filter_type = filter_type
         self.use_filter = bool(use_filter and filter_type != "none")
-        self.safe_filter = SampleBasedVehicleSafetyFilter(filter_cfg or SampleVehicleFilterConfig())
+        if filter_type == "mpc_cbf":
+            fcfg = filter_cfg or SampleVehicleFilterConfig()
+            mcfg = MPCVehicleCBFConfig(
+                dt=float(getattr(fcfg, "dt", 0.1)),
+                horizon=int(getattr(fcfg, "horizon", 10)),
+                steer_limit=float(getattr(fcfg, "steer_limit", 0.7)),
+                throttle_limit=float(getattr(fcfg, "throttle_limit", 0.8)),
+                brake_limit=float(getattr(fcfg, "brake_limit", -0.8)),
+                max_dsteer=float(getattr(fcfg, "max_dsteer", 0.22)),
+                max_daccel=float(getattr(fcfg, "max_daccel", 0.30)),
+                obstacle_radius=float(getattr(fcfg, "obs_radius", 2.0)),
+                safe_distance=float(getattr(fcfg, "safe_radius", 4.0) - getattr(fcfg, "obs_radius", 1.5)),
+            )
+            self.safe_filter = MPCVehicleCBFSafetyFilter(mcfg)
+        else:
+            self.safe_filter = SampleBasedVehicleSafetyFilter(filter_cfg or SampleVehicleFilterConfig())
         self.prev_exec_action = np.zeros(2, dtype=np.float32)
         self.terminate_on_safety_violation = bool(terminate_on_safety_violation)
         self.safety_cost_termination = bool(safety_cost_termination)
@@ -65,7 +81,7 @@ class SafeMetaDriveSampleWrapper(gym.Wrapper):
 
     def step(self, raw_action):
         raw_action = np.asarray(raw_action, dtype=np.float32)
-        if self.use_filter and self.filter_type == "sample_vo":
+        if self.use_filter and self.filter_type in ["sample_vo", "mpc_cbf"]:
             exec_action, filter_info = self.safe_filter.project(raw_action, env=self.env, prev_exec_action=self.prev_exec_action)
         elif self.use_filter and self.filter_type == "rate":
             exec_action = self._simple_rate(raw_action)
