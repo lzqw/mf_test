@@ -60,6 +60,7 @@ class SafeSafetyGymWrapper(gym.Wrapper):
             exec_action, filter_info = self.safe_filter.project(
                 raw_action=raw_action, obs=self.last_obs, info=self.last_info,
                 prev_exec_action=self.prev_exec_action, action_space=self.action_space, env_id=self.env_id,
+                env=self.env,
             )
         else:
             exec_action = np.clip(raw_action, self.action_space.low, self.action_space.high)

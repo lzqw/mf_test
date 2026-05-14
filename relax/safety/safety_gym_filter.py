@@ -2,6 +2,39 @@ from dataclasses import dataclass
 import numpy as np
 
 
+def _to_xy(value):
+    if value is None:
+        return None
+    try:
+        arr = np.asarray(value, dtype=np.float32).reshape(-1)
+    except Exception:
+        return None
+    if arr.size < 2:
+        return None
+    return arr[:2].astype(np.float32)
+
+
+def _get_attr_path(obj, path):
+    cur = obj
+    for name in path.split('.'):
+        if cur is None or not hasattr(cur, name):
+            return None
+        cur = getattr(cur, name)
+    return cur
+
+
+def _iter_collection(value):
+    if value is None:
+        return []
+    if isinstance(value, np.ndarray):
+        if value.ndim == 2 and value.shape[1] >= 2:
+            return [row for row in value]
+        return [value]
+    if isinstance(value, (list, tuple)):
+        return list(value)
+    return [value]
+
+
 @dataclass
 class SafetyGymFilterConfig:
     max_action_norm_point: float = 0.80
@@ -99,7 +132,191 @@ class SafetyGymHardFilter:
                     return False
         return True
 
-    def project(self, raw_action, obs, info, prev_exec_action, action_space, env_id):
+    def _extract_ego_state_from_env(self, env):
+        unknown = {"known": False, "pos": np.zeros(2, dtype=np.float32), "vel": np.zeros(2, dtype=np.float32),
+                   "heading": 0.0, "speed": 0.0, "source": "unknown"}
+        if env is None:
+            return unknown
+        u = getattr(env, "unwrapped", env)
+        obj_paths = ["agent", "robot", "ego", "_agent", "_robot", "task.agent", "task.robot", "task.ego", "unwrapped.agent"]
+        pos_attrs = ["pos", "position", "body_pos", "xy"]
+        pos_methods = ["get_position", "get_xy_position", "get_pos"]
+        vel_attrs = ["vel", "velocity", "linear_velocity"]
+        vel_methods = ["get_velocity", "get_linear_velocity"]
+        heading_attrs = ["heading", "heading_theta", "angle", "theta"]
+
+        for p in obj_paths:
+            obj = _get_attr_path(u, p)
+            if obj is None:
+                continue
+            pos = None
+            src = p
+            for a in pos_attrs:
+                pos = _to_xy(getattr(obj, a, None))
+                if pos is not None:
+                    src = f"{p}.{a}"
+                    break
+            if pos is None:
+                for m in pos_methods:
+                    fn = getattr(obj, m, None)
+                    if callable(fn):
+                        pos = _to_xy(fn())
+                        if pos is not None:
+                            src = f"{p}.{m}()"
+                            break
+            if pos is None:
+                continue
+
+            vel = None
+            for a in vel_attrs:
+                vel = _to_xy(getattr(obj, a, None))
+                if vel is not None:
+                    break
+            if vel is None:
+                for m in vel_methods:
+                    fn = getattr(obj, m, None)
+                    if callable(fn):
+                        vel = _to_xy(fn())
+                        if vel is not None:
+                            break
+            if vel is None:
+                vel = np.zeros(2, dtype=np.float32)
+
+            heading = 0.0
+            for a in heading_attrs:
+                v = getattr(obj, a, None)
+                if v is not None:
+                    try:
+                        heading = float(v)
+                        break
+                    except Exception:
+                        pass
+            fn = getattr(obj, "get_heading", None)
+            if heading == 0.0 and callable(fn):
+                try:
+                    heading = float(fn())
+                except Exception:
+                    pass
+
+            speed = None
+            if hasattr(obj, "speed"):
+                try:
+                    speed = float(getattr(obj, "speed"))
+                except Exception:
+                    speed = None
+            if speed is None:
+                speed = float(np.linalg.norm(vel))
+            return {"known": True, "pos": pos, "vel": vel, "heading": heading, "speed": speed, "source": src}
+
+        for p in ["task.agent_pos", "task.robot_pos", "task.robot_position", "agent_pos", "robot_pos"]:
+            pos = _to_xy(_get_attr_path(u, p))
+            if pos is not None:
+                return {"known": True, "pos": pos, "vel": np.zeros(2, dtype=np.float32), "heading": 0.0, "speed": 0.0, "source": p}
+        return unknown
+
+    def _extract_hazards_from_env(self, env):
+        if env is None:
+            return []
+        u = getattr(env, "unwrapped", env)
+        default_radius = float(getattr(self.cfg, "hazard_radius", self.cfg.hazard_stop))
+        hazards = []
+        cands = ["task.hazards", "task._hazards", "task.hazard", "task.hazards_pos", "task.hazards_position",
+                 "task.hazards_locations", "task.hazards_locations_list", "hazards", "_hazards", "world.hazards",
+                 "world._hazards", "world.geoms", "world.objects", "engine.world.hazards"]
+        scalar_radius_paths = ["task.hazards_size", "task.hazards_radius", "task.hazards_keepout"]
+        scalar_radius = None
+        for rp in scalar_radius_paths:
+            rv = _get_attr_path(u, rp)
+            try:
+                arr = np.asarray(rv, dtype=np.float32).reshape(-1)
+                if arr.size > 0:
+                    scalar_radius = float(arr[0])
+                    break
+            except Exception:
+                pass
+
+        def is_hazard_like(item, src):
+            t = str(type(item)).lower() + ' ' + src.lower() + ' ' + str(getattr(item, 'name', '')).lower()
+            return any(k in t for k in ["hazard", "obstacle", "pillar", "circle"]) and not any(k in t for k in ["goal", "object", "box", "button"])
+
+        for src in cands:
+            coll = _get_attr_path(u, src)
+            if coll is None:
+                continue
+            for h in _iter_collection(coll):
+                pos = None
+                if isinstance(h, (list, tuple, np.ndarray)):
+                    pos = _to_xy(h)
+                    if pos is not None and ("hazards_pos" in src or "hazards_location" in src):
+                        hazards.append({"pos": pos, "radius": scalar_radius or default_radius, "source": src})
+                        continue
+                if pos is None and not is_hazard_like(h, src) and not ("hazard" in src.lower()):
+                    continue
+                for a in ["pos", "position", "body_pos", "xy", "center"]:
+                    pos = _to_xy(getattr(h, a, None))
+                    if pos is not None:
+                        break
+                if pos is None:
+                    for m in ["get_position", "get_xy_position", "get_pos"]:
+                        fn = getattr(h, m, None)
+                        if callable(fn):
+                            pos = _to_xy(fn())
+                            if pos is not None:
+                                break
+                if pos is None:
+                    continue
+                r = None
+                for ra in ["radius", "size", "keepout", "keepout_radius", "geom_radius"]:
+                    try:
+                        v = getattr(h, ra, None)
+                        if v is not None:
+                            r = float(np.asarray(v).reshape(-1)[0])
+                            break
+                    except Exception:
+                        pass
+                if r is None:
+                    r = scalar_radius or default_radius
+                hazards.append({"pos": pos, "radius": float(r), "source": src})
+        return hazards
+
+    def _extract_objects_from_env(self, env):
+        if env is None:
+            return []
+        u = getattr(env, "unwrapped", env)
+        objs = []
+        for src in ["task.objects", "task.object", "task.box", "task.boxes", "task.push_object", "task.obj", "objects", "world.objects"]:
+            coll = _get_attr_path(u, src)
+            if coll is None:
+                continue
+            for o in _iter_collection(coll):
+                pos = _to_xy(o if isinstance(o, (list, tuple, np.ndarray)) else None)
+                if pos is None:
+                    for a in ["pos", "position", "body_pos", "xy", "center"]:
+                        pos = _to_xy(getattr(o, a, None))
+                        if pos is not None:
+                            break
+                if pos is None:
+                    for m in ["get_position", "get_xy_position", "get_pos"]:
+                        fn = getattr(o, m, None)
+                        if callable(fn):
+                            pos = _to_xy(fn())
+                            if pos is not None:
+                                break
+                if pos is None:
+                    continue
+                radius = 0.0
+                for ra in ["radius", "size", "keepout", "geom_radius"]:
+                    try:
+                        v = getattr(o, ra, None)
+                        if v is not None:
+                            radius = float(np.asarray(v).reshape(-1)[0])
+                            break
+                    except Exception:
+                        pass
+                objs.append({"pos": pos, "radius": radius, "source": src})
+        return objs
+
+    def project(self, raw_action, obs, info, prev_exec_action, action_space, env_id, env=None):
         a0 = np.asarray(raw_action, dtype=np.float32)
         a = a0.copy()
         prev = np.asarray(prev_exec_action, dtype=np.float32)
@@ -156,7 +373,15 @@ class SafetyGymHardFilter:
         global_min_h = front_h = left_h = right_h = np.nan
         if self.filter_type == "sample_shield":
             projected = a.copy()
-            danger = self.parse_lidar_danger(obs, info)
+            ego = self._extract_ego_state_from_env(env)
+            hazards = self._extract_hazards_from_env(env)
+            objects = self._extract_objects_from_env(env)
+            if hazards and ego["known"]:
+                dists = [float(np.linalg.norm(h["pos"] - ego["pos"]) - h["radius"]) for h in hazards]
+                nearest = float(np.min(dists))
+                danger = dict(global_min_dist=nearest, front_min_dist=nearest, left_min_dist=nearest, right_min_dist=nearest)
+            else:
+                danger = dict(global_min_dist=np.nan, front_min_dist=np.nan, left_min_dist=np.nan, right_min_dist=np.nan)
             global_min_h = float(danger["global_min_dist"] - self.cfg.hazard_stop) if np.isfinite(danger["global_min_dist"]) else np.nan
             front_h = float(danger["front_min_dist"] - self.cfg.hazard_stop) if np.isfinite(danger["front_min_dist"]) else np.nan
             left_h = float(danger["left_min_dist"] - self.cfg.hazard_stop) if np.isfinite(danger["left_min_dist"]) else np.nan
@@ -222,6 +447,14 @@ class SafetyGymHardFilter:
             "front_h": front_h,
             "left_h": left_h,
             "right_h": right_h,
+            "gt_known": float(ego["known"]) if self.filter_type == "sample_shield" else 0.0,
+            "ego_x": float(ego["pos"][0]) if self.filter_type == "sample_shield" and ego["known"] else np.nan,
+            "ego_y": float(ego["pos"][1]) if self.filter_type == "sample_shield" and ego["known"] else np.nan,
+            "num_hazards": float(len(hazards)) if self.filter_type == "sample_shield" else 0.0,
+            "nearest_hazard_dist": danger.get("global_min_dist", np.nan) if self.filter_type == "sample_shield" else np.nan,
+            "predicted_min_h": global_min_h,
+            "selected_candidate_type": "safe_candidate" if self.filter_type == "sample_shield" and num_safe_candidates > 0 else ("emergency" if self.filter_type == "sample_shield" else "none"),
+            "num_objects": float(len(objects)) if self.filter_type == "sample_shield" else 0.0,
             "filter_active_005": float(residual > 0.05),
             "filter_active_010": float(residual > 0.10),
         }
