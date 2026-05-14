@@ -47,6 +47,27 @@ def build_env_kwargs(args):
     return {}
 
 
+def get_metadrive_seed_range(env):
+    base = getattr(env, "unwrapped", env)
+    start_index = int(getattr(base, "start_index", 0))
+    num_scenarios = int(getattr(base, "num_scenarios", 1))
+    return start_index, max(num_scenarios, 1)
+
+
+def canonical_metadrive_seed(env, seed):
+    if seed is None:
+        return None
+    start_index, num_scenarios = get_metadrive_seed_range(env)
+    return start_index + (int(seed) - start_index) % num_scenarios
+
+
+def reset_metadrive_env(env, seed=None):
+    seed = canonical_metadrive_seed(env, seed)
+    if seed is None:
+        return env.reset()
+    return env.reset(seed=seed)
+
+
 def safe_nanmean(values, default=None):
     finite_values = []
     for v in values:
@@ -88,7 +109,10 @@ def save_state_checkpoint(agent, path):
 def eval_agent(agent,args,env):
     mets=[]
     for ep in range(args.eval_episodes):
-        obs,_=env.reset(seed=args.seed+1000+ep); done=False; ret=0.0; steps=0; far=[]; apr=[]; info={}; costs=[]; vels=[]; nsc=[]; fbs=[]; crashes=[]; out_of_roads=[]; safe_violations=[]; sample_filter_active=[]; vcr=[]; mpd=[]; mpt=[]; mph=[]; vov=[]; ttcv=[]; lv=[]; ft=[]; failures=[]; safety_failures=[]; terminated_by_safety=[]
+        # In MetaDrive, reset(seed=...) selects scenario_index. For single-scenario
+        # custom envs such as FlatThreeLaneStraight, valid seed is only 0. Therefore
+        # all reset seeds must be mapped into [start_index, start_index + num_scenarios).
+        obs,_=reset_metadrive_env(env,args.seed+1000+ep); done=False; ret=0.0; steps=0; far=[]; apr=[]; info={}; costs=[]; vels=[]; nsc=[]; fbs=[]; crashes=[]; out_of_roads=[]; safe_violations=[]; sample_filter_active=[]; vcr=[]; mpd=[]; mpt=[]; mph=[]; vov=[]; ttcv=[]; lv=[]; ft=[]; failures=[]; safety_failures=[]; terminated_by_safety=[]
         while not done and steps<1000:
             a=env.action_space.sample() if agent is None else np.asarray(agent.get_action(jax.random.PRNGKey(args.seed + 1000 + ep * 10000 + steps), obs[None])[0])
             obs,r,term,trunc,info=env.step(a); done=term or trunc; ret+=float(r); steps+=1; far.append(float(info.get('filter_active',0.0))); apr.append(float(info.get('projection_residual',0.0))); costs.append(float(info.get('cost',0.0))); vels.append(float(info.get('velocity',0.0))); nsc.append(float(info.get('no_safe_candidate',0.0))); fbs.append(float(info.get('fallback',0.0))); vcr.append(float(info.get('valid_candidate_ratio',0.0))); mpd.append(float(info.get('min_pred_dist',np.nan))); mpt.append(float(info.get('min_pred_ttc',np.nan))); mph.append(float(info.get('min_pred_h_vo',np.nan))); vov.append(float(info.get('vo_violation',0.0))); ttcv.append(float(info.get('ttc_violation',0.0))); lv.append(float(info.get('lane_violation',0.0))); ft.append(float(info.get('filter_time_ms',0.0))); crashes.append(float(info.get('crash',0.0))); out_of_roads.append(float(info.get('out_of_road',0.0))); safe_violations.append(float(info.get('safe_violation',0.0))); sample_filter_active.append(float(info.get('sample_filter_active',0.0))); failures.append(float(info.get('failure',0.0))); safety_failures.append(float(info.get('safety_failure',0.0))); terminated_by_safety.append(float(info.get('terminated_by_safety',0.0)))
@@ -113,7 +137,10 @@ def main():
     p.add_argument('--entropy_reg_mode',choices=['legacy','likelihood_tn','flac_tn'],default='legacy'); p.add_argument('--use_tn_energy',action='store_true'); p.add_argument('--candidate_temp',type=float,default=0.1); p.add_argument('--beta_normal_entropy',type=float,default=1.0); p.add_argument('--min_effective_entropy',type=float,default=-20.0); p.add_argument('--target_effective_entropy',type=float,default=1.0); p.add_argument('--normal_energy_coef',type=float,default=0.05); p.add_argument('--weight_mix',type=float,default=0.05)
     args=p.parse_args(); np.random.seed(args.seed)
     log=Path(args.log_dir); log.mkdir(parents=True,exist_ok=True); writer=SummaryWriter(str(log/'tb')); (log/'args.json').write_text(json.dumps(vars(args),indent=2,sort_keys=True))
-    env=SafeMetaDriveSampleWrapper(args.env_name,use_filter=args.use_filter,filter_type=args.filter_type,filter_cfg=SampleVehicleFilterConfig(num_local_samples=args.num_local_samples,num_prev_samples=args.num_prev_samples,num_maneuver_samples=args.num_maneuver_samples,horizon=args.horizon,dt=args.dt,steer_limit=args.steer_limit,throttle_limit=args.throttle_limit,brake_limit=args.brake_limit,max_dsteer=args.max_dsteer,max_daccel=args.max_daccel,safe_radius=args.safe_radius,ttc_min=args.ttc_min,h_vo_margin=args.h_vo_margin,lane_margin_min=args.lane_margin_min,allowed_lane_change=args.allowed_lane_change,lane_corridor_margin=args.lane_corridor_margin,max_abs_lateral_from_start_lane=args.max_abs_lateral_from_start_lane,vo_activation_distance=args.vo_activation_distance,ttc_activation_threshold=args.ttc_activation_threshold,min_closing_speed=args.min_closing_speed),terminate_on_safety_violation=args.terminate_on_safety_violation,safety_cost_termination=args.safety_cost_termination,**build_env_kwargs(args)); obs,_=env.reset(seed=args.seed)
+    env=SafeMetaDriveSampleWrapper(args.env_name,use_filter=args.use_filter,filter_type=args.filter_type,filter_cfg=SampleVehicleFilterConfig(num_local_samples=args.num_local_samples,num_prev_samples=args.num_prev_samples,num_maneuver_samples=args.num_maneuver_samples,horizon=args.horizon,dt=args.dt,steer_limit=args.steer_limit,throttle_limit=args.throttle_limit,brake_limit=args.brake_limit,max_dsteer=args.max_dsteer,max_daccel=args.max_daccel,safe_radius=args.safe_radius,ttc_min=args.ttc_min,h_vo_margin=args.h_vo_margin,lane_margin_min=args.lane_margin_min,allowed_lane_change=args.allowed_lane_change,lane_corridor_margin=args.lane_corridor_margin,max_abs_lateral_from_start_lane=args.max_abs_lateral_from_start_lane,vo_activation_distance=args.vo_activation_distance,ttc_activation_threshold=args.ttc_activation_threshold,min_closing_speed=args.min_closing_speed),terminate_on_safety_violation=args.terminate_on_safety_violation,safety_cost_termination=args.safety_cost_termination,**build_env_kwargs(args)); obs,_=reset_metadrive_env(env,args.seed)
+    start_index, num_scenarios = get_metadrive_seed_range(env)
+    print("metadrive_start_index:", start_index)
+    print("metadrive_num_scenarios:", num_scenarios)
     print("=" * 80)
     print("MetaDrive Safe-Pullback Training")
     print("env_name:", args.env_name)
@@ -192,7 +219,7 @@ def main():
         if step%args.eval_interval==0:
             eval_start = time.perf_counter()
             e=eval_agent(agent,args,env)
-            obs,_=env.reset(seed=args.seed + step + 1)
+            obs,_=reset_metadrive_env(env,args.seed + step + 1)
             eval_time = time.perf_counter() - eval_start
             e['step']=step
             e['safety_score']=float(e.get('crash_rate',0.0)+e.get('out_of_road_rate',0.0)+e.get('cost_mean',0.0)+e.get('fallback_rate',0.0))
