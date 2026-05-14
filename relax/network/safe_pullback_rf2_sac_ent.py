@@ -22,6 +22,7 @@ class SafePullbackRF2Params(NamedTuple):
     target_vp: hk.Params
     policy: hk.Params
     target_policy: hk.Params
+    g: hk.Params
     log_alpha: jax.Array
 
 
@@ -31,6 +32,7 @@ class SafePullbackRF2SACENTNet:
     qp: Callable
     vp: Callable
     policy: Callable
+    g: Callable
     num_timesteps: int
     num_ent_timesteps: int
     num_timesteps_test: int
@@ -55,6 +57,9 @@ class SafePullbackRF2SACENTNet:
 
     def get_vp(self, vp_params, obs):
         return self.vp(vp_params, obs)
+
+    def get_exec_action_hat(self, g_params, obs, raw_action):
+        return self.g(g_params, obs, raw_action)
 
 
     def directional_noise(self, key, obs, base_std, return_components=False):
@@ -174,21 +179,23 @@ def create_safe_pullback_rf2_sac_ent_net(
     qp = hk.without_apply_rng(hk.transform(lambda obs, act: QNet(hidden_sizes, activation)(obs, act)))
     vp = hk.without_apply_rng(hk.transform(lambda obs: hk.nets.MLP((*hidden_sizes, 1), activation=activation)(obs).squeeze(-1)))
     policy = hk.without_apply_rng(hk.transform(lambda obs, act, t: DACERPolicyNet(diffusion_hidden_sizes, activation)(obs, act, t)))
+    g = hk.without_apply_rng(hk.transform(lambda obs, act: jnp.tanh(hk.nets.MLP((*hidden_sizes, act_dim), activation=activation)(jnp.concatenate([obs, act], axis=-1)))))
 
     @jax.jit
     def init(key, obs, act):
-        k1, k2, k3, k4, k5 = jax.random.split(key, 5)
+        k1, k2, k3, k4, k5, k6 = jax.random.split(key, 6)
         q1 = q.init(k1, obs, act)
         q2 = q.init(k2, obs, act)
         qp_p = qp.init(k3, obs, act)
         vp_p = vp.init(k4, obs)
         pol = policy.init(k5, obs, act, 0)
-        return SafePullbackRF2Params(q1, q2, q1, q2, qp_p, vp_p, vp_p, pol, pol, jnp.array(math.log(init_alpha), dtype=jnp.float32))
+        gp = g.init(k6, obs, act)
+        return SafePullbackRF2Params(q1, q2, q1, q2, qp_p, vp_p, vp_p, pol, pol, gp, jnp.array(math.log(init_alpha), dtype=jnp.float32))
 
     sample_obs = jnp.zeros((1, obs_dim))
     sample_act = jnp.zeros((1, act_dim))
     params = init(key, sample_obs, sample_act)
-    net = SafePullbackRF2SACENTNet(q=q.apply, qp=qp.apply, vp=vp.apply, policy=policy.apply,
+    net = SafePullbackRF2SACENTNet(q=q.apply, qp=qp.apply, vp=vp.apply, policy=policy.apply, g=g.apply,
                                    num_timesteps=num_timesteps, num_ent_timesteps=num_ent_timesteps,
                                    num_timesteps_test=num_timesteps_test, act_dim=act_dim,
                                    target_entropy=-act_dim * target_entropy_scale, num_particles=num_particles,
