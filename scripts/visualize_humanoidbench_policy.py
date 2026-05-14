@@ -30,6 +30,18 @@ def load_args(log_dir: Path):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--log_dir", type=str, required=True)
+    parser.add_argument(
+        "--checkpoint_name",
+        type=str,
+        default="checkpoint.pkl",
+        help="Checkpoint filename inside log_dir, e.g. checkpoint.pkl, best_return_checkpoint.pkl, best_hand_dist_checkpoint.pkl",
+    )
+    parser.add_argument(
+        "--checkpoint_path",
+        type=str,
+        default=None,
+        help="Optional explicit checkpoint path. If provided, overrides log_dir/checkpoint_name.",
+    )
     parser.add_argument("--episodes", type=int, default=3)
     parser.add_argument("--max_steps", type=int, default=1000)
     parser.add_argument("--seed", type=int, default=0)
@@ -42,9 +54,9 @@ def main():
     log_dir = Path(args.log_dir)
     train_args = load_args(log_dir)
 
-    ckpt_path = log_dir / "checkpoint.pkl"
+    ckpt_path = Path(args.checkpoint_path) if args.checkpoint_path else (log_dir / args.checkpoint_name)
     if not ckpt_path.exists():
-        raise FileNotFoundError(f"checkpoint.pkl not found: {ckpt_path}")
+        raise FileNotFoundError(f"checkpoint not found: {ckpt_path}")
 
     print("=" * 80)
     print("Visualizing HumanoidBench policy")
@@ -56,18 +68,28 @@ def main():
     print("use_filter:", not args.no_filter)
     print("=" * 80)
 
+    blocked_hands = getattr(train_args, "blocked_hands", None)
+    small_obs = getattr(train_args, "small_obs", None)
+
     env = SafeHumanoidBenchWrapper(
         train_args.env_name,
         use_filter=(not args.no_filter),
         render_mode=args.render_mode,
         filter_cfg=HumanoidSafeFilterConfig(
-            residual_radius=train_args.residual_radius,
-            smooth_radius=train_args.smooth_radius,
+            residual_radius=getattr(train_args, "residual_radius", 0.35),
+            smooth_radius=getattr(train_args, "smooth_radius", 0.25),
+            max_delta=getattr(train_args, "max_delta", 0.1),
+            target_step_radius=getattr(train_args, "target_step_radius", 0.08),
+            reachable_radius=getattr(train_args, "reachable_radius", 0.45),
+            z_min_safe=getattr(train_args, "z_min_safe", 0.4),
+            z_max_safe=getattr(train_args, "z_max_safe", 1.8),
         ),
-        policy_path=train_args.policy_path,
-        mean_path=train_args.mean_path,
-        var_path=train_args.var_path,
-        policy_type=train_args.policy_type,
+        policy_path=getattr(train_args, "policy_path", None),
+        mean_path=getattr(train_args, "mean_path", None),
+        var_path=getattr(train_args, "var_path", None),
+        policy_type=getattr(train_args, "policy_type", None),
+        blocked_hands=blocked_hands,
+        small_obs=small_obs,
     )
 
     obs, _ = env.reset(seed=args.seed)
