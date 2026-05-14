@@ -61,6 +61,10 @@ def parse_args():
     p.add_argument("--mpc_max_steer_angle", type=float, default=0.5)
     p.add_argument("--mpc_fallback_brake", type=float, default=-0.4)
     p.add_argument("--mpc_solver_max_iter", type=int, default=100)
+    p.add_argument("--mpc_preserve_raw_accel", action=argparse.BooleanOptionalAction, default=True)
+    p.add_argument("--mpc_disable_brake", action=argparse.BooleanOptionalAction, default=True)
+    p.add_argument("--mpc_min_forward_accel_when_active", type=float, default=0.0)
+    p.add_argument("--mpc_failed_keep_raw_accel", action=argparse.BooleanOptionalAction, default=True)
     p.add_argument("--show_status_panel", action=argparse.BooleanOptionalAction, default=False)
     p.add_argument("--strict_filter_check", action=argparse.BooleanOptionalAction, default=True)
     p.add_argument("--print_every", type=int, default=20)
@@ -178,6 +182,10 @@ def main():
             min_closing_speed=args.min_closing_speed,
             fallback_brake=args.mpc_fallback_brake,
             solver_max_iter=args.mpc_solver_max_iter,
+            preserve_raw_accel=args.mpc_preserve_raw_accel,
+            disable_mpc_brake=args.mpc_disable_brake,
+            min_forward_accel_when_mpc_active=args.mpc_min_forward_accel_when_active,
+            mpc_failed_keep_raw_accel=args.mpc_failed_keep_raw_accel,
         )
         filt = MPCVehicleCBFSafetyFilter(mpc_cfg)
     else:
@@ -243,6 +251,9 @@ def main():
                 f"min_pred_h_cbf={filter_info.get('min_pred_h_cbf', np.nan):.3f} min_pred_cbf={filter_info.get('min_pred_cbf', np.nan):.3f}",
                 f"cbf_violation={filter_info.get('cbf_violation', 0):.1f}",
                 f"mpc_steer={filter_info.get('mpc_steer', 0):.3f} mpc_alpha_min={filter_info.get('mpc_alpha_min', 0):.3f}",
+                f"preserve_raw_accel={filter_info.get('preserve_raw_accel', 0):.1f} disable_mpc_brake={filter_info.get('disable_mpc_brake', 0):.1f}",
+                f"raw_accel_preserved={filter_info.get('raw_accel_preserved', 0):.1f} accel_modified_by_mpc={filter_info.get('accel_modified_by_mpc', 0):.1f}",
+                f"mpc_accel_cmd={filter_info.get('mpc_accel_cmd', 0):.3f}",
                 f"sign_s={filter_info.get('sign_s', 0):.1f}",
                 f"filter_time_ms={filter_info.get('filter_time_ms', 0):.2f}",
                 f"speed={speed:.3f}",
