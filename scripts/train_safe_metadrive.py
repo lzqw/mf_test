@@ -27,6 +27,10 @@ def sample_batch(buf,b):
     idx=np.random.randint(0,len(buf),size=b); it=[buf[i] for i in idx]
     return Batch(*(jnp.asarray(np.stack([getattr(x,f) for x in it])) for f in Batch._fields))
 
+def parse_float_tuple(csv_text):
+    values = [v.strip() for v in csv_text.split(',') if v.strip()]
+    return tuple(float(v) for v in values)
+
 def make_algo(args, obs_dim, act_dim):
     key=jax.random.PRNGKey(args.seed)
     net, params = create_safe_pullback_rf2_sac_ent_net(key, obs_dim, act_dim, hidden_sizes=[256]*3, diffusion_hidden_sizes=[256]*3,
@@ -40,7 +44,8 @@ def make_algo(args, obs_dim, act_dim):
         min_effective_entropy=args.min_effective_entropy, target_effective_entropy=args.target_effective_entropy,
         normal_energy_coef=args.normal_energy_coef, weight_mix=args.weight_mix, residual_radius=args.residual_radius, action_limit=1.0,
         num_uniform_candidates=args.num_uniform_candidates, include_zero_candidate=args.include_zero_candidate,
-        local_candidate_noise_scale=args.local_candidate_noise_scale)
+        local_candidate_noise_scale=args.local_candidate_noise_scale, num_forward_candidates=args.num_forward_candidates,
+        forward_candidate_throttles=args.forward_candidate_throttles, forward_candidate_steers=args.forward_candidate_steers)
 
 def is_finite_number(x):
     try:
@@ -149,9 +154,14 @@ def main():
     p.add_argument('--num_uniform_candidates',type=int,default=0)
     p.add_argument('--include_zero_candidate',action=argparse.BooleanOptionalAction,default=True)
     p.add_argument('--local_candidate_noise_scale',type=float,default=-1.0)
+    p.add_argument('--num_forward_candidates',type=int,default=0)
+    p.add_argument('--forward_candidate_throttles',type=str,default='0.25,0.45')
+    p.add_argument('--forward_candidate_steers',type=str,default='0.0,0.10,-0.10')
     p.add_argument('--entropy_reg_mode',choices=['legacy','likelihood_tn','flac_tn'],default='legacy'); p.add_argument('--use_tn_energy',action='store_true'); p.add_argument('--candidate_temp',type=float,default=0.1); p.add_argument('--beta_normal_entropy',type=float,default=1.0); p.add_argument('--min_effective_entropy',type=float,default=-20.0); p.add_argument('--target_effective_entropy',type=float,default=1.0); p.add_argument('--normal_energy_coef',type=float,default=0.05); p.add_argument('--weight_mix',type=float,default=0.05)
     p.add_argument('--render_train',action=argparse.BooleanOptionalAction,default=False); p.add_argument('--render_mode',choices=['topdown','human'],default='topdown'); p.add_argument('--render_every',type=int,default=1); p.add_argument('--topdown_size',type=int,default=800); p.add_argument('--render_window',action=argparse.BooleanOptionalAction,default=True)
     args=p.parse_args(); np.random.seed(args.seed)
+    args.forward_candidate_throttles = parse_float_tuple(args.forward_candidate_throttles)
+    args.forward_candidate_steers = parse_float_tuple(args.forward_candidate_steers)
     fallback_pass_side_value = -1.0 if args.fallback_pass_side == "left" else 1.0
     log=Path(args.log_dir); log.mkdir(parents=True,exist_ok=True); writer=SummaryWriter(str(log/'tb'))
     args_payload = dict(vars(args))
