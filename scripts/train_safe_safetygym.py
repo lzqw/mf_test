@@ -141,10 +141,11 @@ def save_partial_outputs(log_dir, train_metrics, eval_metrics, step_metrics, age
     _save_csv(log_dir / "eval_metrics.csv", eval_metrics)
     _save_csv(log_dir / "train_metrics.csv", train_metrics)
 
-def eval_agent(agent, args, env):
+def eval_agent(agent, args, env, eval_scene_seed=None):
     ms=[]
     for ep in range(args.eval_episodes):
-        obs,_=env.reset(seed=args.seed+1000+ep); done=False; ret=0; l=0; costs=[]; fars=[]; aprs=[]; rns=[]; ens=[]; mins=[]; cbfs=[]; sv=[]; cv=[]; sc_ratio=[]; emergency=[]; gh=[]; fh=[]; lh=[]; rh=[]; goal_dists=[]; goal_met_steps=[]; goal_reached_steps=[]; info={}
+        reset_seed = eval_scene_seed if args.fixed_scene else (args.seed + 1000 + ep)
+        obs,_=env.reset(seed=reset_seed); done=False; ret=0; l=0; costs=[]; fars=[]; aprs=[]; rns=[]; ens=[]; mins=[]; cbfs=[]; sv=[]; cv=[]; sc_ratio=[]; emergency=[]; gh=[]; fh=[]; lh=[]; rh=[]; goal_dists=[]; goal_met_steps=[]; goal_reached_steps=[]; info={}
         while not done and l<1000:
             a=np.asarray(agent.get_action(jax.random.PRNGKey(args.seed+ep*10000+l),obs[None])[0]); obs,r,t,tr,info=env.step(a); done=t or tr; ret+=float(r); l+=1
             costs.append(safe_info_float(info, 'cost', 0)); fars.append(safe_info_float(info, 'filter_active', 0)); aprs.append(safe_info_float(info, 'projection_residual', 0)); rns.append(safe_info_float(info, 'raw_action_norm', 0)); ens.append(safe_info_float(info, 'exec_action_norm', 0)); mins.append(safe_info_float(info, 'min_h', np.nan)); cbfs.append(safe_info_float(info, 'cbf_violation', 0)); sv.append(safe_info_float(info, 'safety_violation', 0)); cv.append(safe_info_float(info, 'constraint_violation', 0)); sc_ratio.append(safe_info_float(info, 'safe_candidate_ratio', 0.0)); emergency.append(safe_info_float(info, 'emergency_active', 0.0)); gh.append(safe_info_float(info, 'global_min_h', np.nan)); fh.append(safe_info_float(info, 'front_h', np.nan)); lh.append(safe_info_float(info, 'left_h', np.nan)); rh.append(safe_info_float(info, 'right_h', np.nan)); goal_dists.append(safe_info_float(info, 'goal_dist', np.nan)); goal_met_steps.append(safe_info_float(info, 'goal_met', 0.0)); goal_reached_steps.append(safe_info_float(info, 'goal_reached_by_dist', 0.0))
@@ -157,12 +158,13 @@ def eval_agent(agent, args, env):
     return out
 
 
-def rollout_eval_trajectories(agent, args, env, save_dir, step):
+def rollout_eval_trajectories(agent, args, env, save_dir, step, eval_scene_seed=None):
     out_dir = Path(save_dir) if save_dir else Path(args.log_dir) / "eval_trajectories" / f"step_{step}"
     out_dir.mkdir(parents=True, exist_ok=True)
     safe_filter = getattr(env, "safe_filter", None)
     for ep in range(args.eval_traj_episodes):
-        obs, _ = env.reset(seed=args.seed + 2000 + step + ep)
+        reset_seed = eval_scene_seed if args.fixed_scene else (args.seed + 2000 + step + ep)
+        obs, _ = env.reset(seed=reset_seed)
         scene = collect_scene(env, safe_filter) if safe_filter is not None else {"hazards": [], "objects": [], "goal": None}
         records = []
         done = False
@@ -202,17 +204,27 @@ if __name__=='__main__':
     p.add_argument('--save_partial_on_eval',action='store_true',default=True)
     p.add_argument('--plot_train_window',type=int,default=100)
     p.add_argument('--use_tn_energy',action='store_true'); p.add_argument('--use_projection_critic',action='store_true'); p.add_argument('--lambda_p',type=float,default=0.03); p.add_argument('--lambda_p_warmup_steps',type=int,default=0); p.add_argument('--entropy_reg_mode',default='flac_tn'); p.add_argument('--sample_k',type=int,default=256); p.add_argument('--diffusion_steps',type=int,default=10); p.add_argument('--num_ent_timesteps',type=int,default=10); p.add_argument('--policy_noise_scale',type=float,default=0.3); p.add_argument('--use_directional_noise',action='store_true'); p.add_argument('--fixed_alpha',action='store_true'); p.add_argument('--alpha_value',type=float,default=0.1); p.add_argument('--init_alpha',type=float,default=0.1); p.add_argument('--lr',type=float,default=3e-4); p.add_argument('--alpha_lr',type=float,default=1e-2); p.add_argument('--gamma',type=float,default=0.99); p.add_argument('--gamma_p',type=float,default=0.99); p.add_argument('--use_filter_surrogate',action='store_true'); p.add_argument('--surrogate_warmup_steps',type=int,default=0); p.add_argument('--surrogate_loss_coef',type=float,default=1.0); p.add_argument('--lambda_raw_norm',type=float,default=0.0)
+    p.add_argument('--fixed_scene', action='store_true')
+    p.add_argument('--scene_seed', type=int, default=None)
+    p.add_argument('--eval_scene_seed', type=int, default=None)
     p.add_argument('--save_eval_trajectories', action='store_true')
     p.add_argument('--eval_traj_episodes', type=int, default=1)
     p.add_argument('--eval_traj_stride', type=int, default=25)
     p.add_argument('--eval_traj_dir', type=str, default=None)
     args=p.parse_args(); np.random.seed(args.seed)
+    scene_seed = args.seed
+    eval_scene_seed = args.seed
+    if args.fixed_scene:
+        scene_seed = args.scene_seed if args.scene_seed is not None else args.seed
+        eval_scene_seed = args.eval_scene_seed if args.eval_scene_seed is not None else scene_seed
+    args.scene_seed = scene_seed
+    args.eval_scene_seed = eval_scene_seed
     if args.save_curve_interval < 0:
         args.save_curve_interval = 0
     log=Path(args.log_dir); (log/'checkpoints').mkdir(parents=True,exist_ok=True); writer=SummaryWriter(str(log/'tb')); (log/'args.json').write_text(json.dumps(vars(args),indent=2,sort_keys=True))
     env=SafeSafetyGymWrapper(env_id=args.env_id,use_filter=args.use_filter,filter_type=args.filter_type,terminate_on_safety_violation=args.terminate_on_safety_violation,cost_limit_per_step=args.cost_limit_per_step)
     eenv=SafeSafetyGymWrapper(env_id=args.env_id,use_filter=args.use_filter,filter_type=args.filter_type,terminate_on_safety_violation=args.terminate_on_safety_violation,cost_limit_per_step=args.cost_limit_per_step)
-    obs,_=env.reset(seed=args.seed); agent=make_algo(args,env.observation_space.shape[0],env.action_space.shape[0]); key=jax.random.PRNGKey(args.seed+7); buf=[]; train=[]; ev=[]; step_metrics=[]; best={'return_':(-1e18,'best_return_checkpoint.pkl',max),'cost_return':(1e18,'best_cost_checkpoint.pkl',min),'success_rate':(-1e18,'best_success_checkpoint.pkl',max),'safety_score':(1e18,'best_safety_checkpoint.pkl',min)}
+    obs,_=env.reset(seed=scene_seed if args.fixed_scene else args.seed); agent=make_algo(args,env.observation_space.shape[0],env.action_space.shape[0]); key=jax.random.PRNGKey(args.seed+7); buf=[]; train=[]; ev=[]; step_metrics=[]; best={'return_':(-1e18,'best_return_checkpoint.pkl',max),'cost_return':(1e18,'best_cost_checkpoint.pkl',min),'success_rate':(-1e18,'best_success_checkpoint.pkl',max),'safety_score':(1e18,'best_safety_checkpoint.pkl',min)}
     start=time.perf_counter(); pbar=tqdm(range(1,args.total_steps+1))
     try:
         for step in pbar:
@@ -252,7 +264,11 @@ if __name__=='__main__':
                 "goal_reached_by_dist": safe_info_float(info, "goal_reached_by_dist", 0.0),
             }
             step_metrics.append(row)
-            if term or trunc: obs,_=env.reset()
+            if term or trunc:
+                if args.fixed_scene:
+                    obs,_=env.reset(seed=scene_seed)
+                else:
+                    obs,_=env.reset()
             for k, v in info.items():
                 try:
                     if isinstance(v, (str, bytes)):
@@ -266,10 +282,10 @@ if __name__=='__main__':
             if step>=args.update_after and len(buf)>=args.batch_size:
                 out=agent.update(jax.random.PRNGKey(args.seed+step),sample_batch(buf,args.batch_size)); out['step']=step; train.append(out)
             if step%args.eval_interval==0:
-                m=eval_agent(agent,args,eenv); m['step']=step; ev.append(m)
+                m=eval_agent(agent,args,eenv,eval_scene_seed=eval_scene_seed); m['step']=step; ev.append(m)
                 if args.save_eval_trajectories:
                     try:
-                        traj_dir = rollout_eval_trajectories(agent, args, eenv, args.eval_traj_dir, step)
+                        traj_dir = rollout_eval_trajectories(agent, args, eenv, args.eval_traj_dir, step, eval_scene_seed=eval_scene_seed)
                         print(f"[eval traj] saved to {traj_dir}")
                     except Exception as e:
                         print(f"[eval traj][warning] failed at step {step}: {e}")
@@ -282,7 +298,7 @@ if __name__=='__main__':
                     save_partial_outputs(log, train, ev, step_metrics, agent.state)
                 if args.save_curve_interval == 0 or (args.save_curve_interval > 0 and step % args.save_curve_interval == 0):
                     save_curves(log, step_metrics, ev, train, window=args.plot_train_window, curve_dir=args.curve_dir)
-            pbar.set_postfix(r=f"{reward:.2f}",cost=f"{info.get('cost',0):.2f}",FAR=f"{info.get('filter_active',0):.2f}",APR=f"{info.get('projection_residual',0):.3f}",raw_norm=f"{info.get('raw_action_norm',0):.2f}",exec_norm=f"{info.get('exec_action_norm',0):.2f}",eval_ret=f"{(ev[-1]['return_'] if ev else np.nan):.1f}",eval_cost=f"{(ev[-1]['cost_return'] if ev else np.nan):.2f}",succ=f"{(ev[-1]['success_rate'] if ev else 0):.2f}",sps=f"{step/(time.perf_counter()-start):.1f}")
+            pbar.set_postfix(r=f"{reward:.2f}",cost=f"{info.get('cost',0):.2f}",FAR=f"{info.get('filter_active',0):.2f}",APR=f"{info.get('projection_residual',0):.3f}",raw_norm=f"{info.get('raw_action_norm',0):.2f}",exec_norm=f"{info.get('exec_action_norm',0):.2f}",goal_dist=f"{safe_info_float(info,'goal_dist',np.nan):.2f}",eval_ret=f"{(ev[-1]['return_'] if ev else np.nan):.1f}",eval_cost=f"{(ev[-1]['cost_return'] if ev else np.nan):.2f}",success=f"{(ev[-1]['success_rate'] if ev else 0):.2f}",sps=f"{step/(time.perf_counter()-start):.1f}")
     except KeyboardInterrupt:
         print("[INTERRUPTED] saving partial metrics/checkpoint...")
         save_partial_outputs(log, train, ev, step_metrics, agent.state)
