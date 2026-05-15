@@ -37,7 +37,9 @@ class SafePullbackRF2SACENTMetaDrive(Algorithm):
                  beta_normal_entropy=1.0, min_effective_entropy=-20.0, target_effective_entropy=1.0,
                  normal_energy_coef=0.05, target_safe_energy=0.05,
                  safe_iso_coef=0.05, safe_energy_variant="normal_iso", weight_mix=0.05, residual_radius=0.35, action_limit=1.0,
-                 num_uniform_candidates: int = 0, include_zero_candidate: bool = True, local_candidate_noise_scale: float = -1.0):
+                 num_uniform_candidates: int = 0, include_zero_candidate: bool = True, local_candidate_noise_scale: float = -1.0,
+                 num_forward_candidates: int = 0, forward_candidate_throttles: tuple = (0.25, 0.45),
+                 forward_candidate_steers: tuple = (0.0, 0.10, -0.10)):
         self.agent = agent
         self.gamma = gamma
         self.gamma_p = gamma_p
@@ -80,6 +82,9 @@ class SafePullbackRF2SACENTMetaDrive(Algorithm):
         self.num_uniform_candidates = int(num_uniform_candidates)
         self.include_zero_candidate = bool(include_zero_candidate)
         self.local_candidate_noise_scale = float(local_candidate_noise_scale)
+        self.num_forward_candidates = int(num_forward_candidates)
+        self.forward_candidate_throttles = tuple(float(x) for x in forward_candidate_throttles)
+        self.forward_candidate_steers = tuple(float(x) for x in forward_candidate_steers)
 
         self.state = SafePullbackRF2TrainState(
             params=params,
@@ -252,7 +257,26 @@ class SafePullbackRF2SACENTMetaDrive(Algorithm):
             if self.include_zero_candidate:
                 fixed_candidates.append(jnp.zeros_like(raw_action)[:, None, :])
 
-            n_fixed = len(fixed_candidates)
+            n_forward = 0
+            if self.num_forward_candidates > 0:
+                throttle_1 = self.forward_candidate_throttles[0] if len(self.forward_candidate_throttles) > 0 else 0.25
+                throttle_2 = self.forward_candidate_throttles[1] if len(self.forward_candidate_throttles) > 1 else throttle_1
+                average_throttle = 0.5 * (throttle_1 + throttle_2)
+                steer_1 = self.forward_candidate_steers[1] if len(self.forward_candidate_steers) > 1 else 0.10
+                steer_2 = self.forward_candidate_steers[2] if len(self.forward_candidate_steers) > 2 else -0.10
+                forward_pairs = [
+                    (0.0, throttle_1),
+                    (0.0, throttle_2),
+                    (steer_1, average_throttle),
+                    (steer_2, average_throttle),
+                ]
+                n_forward = min(self.num_forward_candidates, len(forward_pairs), max(K - len(fixed_candidates), 0))
+                if n_forward > 0:
+                    forward_actions = jnp.asarray(forward_pairs[:n_forward], dtype=raw_action.dtype)
+                    forward_actions = jnp.repeat(forward_actions[None, :, :], batch_size, axis=0)
+                    fixed_candidates.append(forward_actions)
+
+            n_fixed = sum(c.shape[1] for c in fixed_candidates)
             n_uniform = min(max(self.num_uniform_candidates, 0), max(K - n_fixed, 0))
             n_local = max(K - n_fixed - n_uniform, 0)
 
@@ -392,6 +416,8 @@ class SafePullbackRF2SACENTMetaDrive(Algorithm):
                         uniform_candidate_fraction=jnp.float32(n_uniform / self.K),
                         local_candidate_fraction=jnp.float32(n_local / self.K),
                         fixed_candidate_fraction=jnp.float32(n_fixed / self.K),
+                        forward_candidate_fraction=jnp.float32(n_forward / self.K),
+                        num_forward_candidates=jnp.float32(n_forward),
                         local_candidate_noise_scale=jnp.float32(local_std),
                         tn_energy=tn_energy, tn_normal_energy=tn_normal_energy,
                         tn_tangent_energy=tn_tangent_energy, tn_gate_mean=tn_gate_mean,
