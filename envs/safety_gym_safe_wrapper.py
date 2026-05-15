@@ -93,17 +93,18 @@ class SafeSafetyGymWrapper(gym.Wrapper):
         if goal_known:
             goal_dist = float(np.linalg.norm(np.asarray(ego["pos"], dtype=np.float32) - np.asarray(goal["pos"], dtype=np.float32)))
 
-        has_goal_flag = any(k in info for k in ("goal_met", "success", "task_success"))
-        goal_met = float(info.get("goal_met", info.get("success", info.get("task_success", 0.0))))
-        goal_reached_by_dist = float(goal_known and np.isfinite(goal_dist) and goal_dist < self.goal_threshold) if not has_goal_flag else float(info.get("goal_reached_by_dist", 0.0))
+        distance_goal_reached = float(goal_known and np.isfinite(goal_dist) and goal_dist < self.goal_threshold)
+        env_goal_met = float(info.get("goal_met", info.get("success", info.get("task_success", 0.0))))
+        existing_success = float(info.get("is_success", 0.0))
 
         info["goal_known"] = float(goal_known)
         info["goal_x"] = float(goal["pos"][0]) if goal.get("known", False) else np.nan
         info["goal_y"] = float(goal["pos"][1]) if goal.get("known", False) else np.nan
         info["goal_dist"] = float(goal_dist) if np.isfinite(goal_dist) else np.nan
-        info["goal_met"] = goal_met
-        info["goal_reached_by_dist"] = goal_reached_by_dist
-        info["is_success"] = max(float(info.get("is_success", 0.0)), goal_met, goal_reached_by_dist)
+        info["env_goal_met"] = env_goal_met
+        info["goal_met"] = env_goal_met
+        info["goal_reached_by_dist"] = distance_goal_reached
+        info["is_success"] = max(existing_success, env_goal_met, distance_goal_reached)
 
         info.update(filter_info)
 

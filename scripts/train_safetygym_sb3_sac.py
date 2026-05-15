@@ -142,7 +142,8 @@ def rollout_eval_trajectories(model, env, args, step: int) -> Optional[Path]:
         goal_met = _safe_info_float(info, "goal_met", 0.0)
         goal_reached = _safe_info_float(info, "goal_reached_by_dist", 0.0)
         succ = max(_safe_info_float(info, "is_success", 0.0), goal_met, goal_reached)
-        title = f"{args.env_id} step={step} ep={ep} final_goal_dist={_safe_info_float(info, "goal_dist", np.nan):.3f} goal_met={goal_met:.2f} success={succ:.2f}"
+        final_goal_dist = _safe_info_float(info, "goal_dist", np.nan)
+        title = f"{args.env_id} step={step} ep={ep} final_goal_dist={final_goal_dist:.3f} goal_met={goal_met:.2f} success={succ:.2f}"
         plot_safetygym_eval_trajectory(records, scene, save_path=str(prefix) + "_trajectory.png", title=title, arrow_stride=args.eval_traj_stride)
         plot_safetygym_eval_diagnostics(records, save_path=str(prefix) + "_diagnostics.png", title=title)
     return out_dir
