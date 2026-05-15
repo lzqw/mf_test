@@ -124,8 +124,10 @@ def save_curves(log_dir, step_metrics, eval_metrics, train_metrics=None, window=
         plt.close(fig)
 
     plot_rows(step_metrics, ["cost", "filter_active", "projection_residual", "raw_action_norm", "exec_action_norm"], "train_safety_curves.png", use_rolling=True)
+    plot_rows(step_metrics, ["goal_dist", "reward", "cost"], "goal_step_curves.png", use_rolling=True)
     plot_rows(step_metrics, ["safe_candidate_ratio", "emergency_active", "current_min_h", "predicted_min_h", "filter_active_005", "filter_active_010"], "shield_curves.png", use_rolling=True)
     plot_rows(eval_metrics, ["return_", "cost_return", "success_rate", "FAR", "APR", "safe_candidate_ratio", "emergency_rate", "safety_score"], "eval_curves.png", use_rolling=False)
+    plot_rows(eval_metrics, ["return_", "success_rate", "goal_dist_final", "goal_dist_mean", "cost_return"], "goal_curves.png", use_rolling=False)
     if train_metrics:
         plot_rows(train_metrics, ["q1_loss", "q2_loss", "qp_loss", "vp_loss", "policy_loss", "q_reward_mean", "q_projection_mean", "lambda_eff", "safe_energy_actor_mean"], "critic_actor_curves.png", use_rolling=False)
 
@@ -142,12 +144,14 @@ def save_partial_outputs(log_dir, train_metrics, eval_metrics, step_metrics, age
 def eval_agent(agent, args, env):
     ms=[]
     for ep in range(args.eval_episodes):
-        obs,_=env.reset(seed=args.seed+1000+ep); done=False; ret=0; l=0; costs=[]; fars=[]; aprs=[]; rns=[]; ens=[]; mins=[]; cbfs=[]; sv=[]; cv=[]; sc_ratio=[]; emergency=[]; gh=[]; fh=[]; lh=[]; rh=[]; info={}
+        obs,_=env.reset(seed=args.seed+1000+ep); done=False; ret=0; l=0; costs=[]; fars=[]; aprs=[]; rns=[]; ens=[]; mins=[]; cbfs=[]; sv=[]; cv=[]; sc_ratio=[]; emergency=[]; gh=[]; fh=[]; lh=[]; rh=[]; goal_dists=[]; goal_met_steps=[]; goal_reached_steps=[]; info={}
         while not done and l<1000:
             a=np.asarray(agent.get_action(jax.random.PRNGKey(args.seed+ep*10000+l),obs[None])[0]); obs,r,t,tr,info=env.step(a); done=t or tr; ret+=float(r); l+=1
-            costs.append(safe_info_float(info, 'cost', 0)); fars.append(safe_info_float(info, 'filter_active', 0)); aprs.append(safe_info_float(info, 'projection_residual', 0)); rns.append(safe_info_float(info, 'raw_action_norm', 0)); ens.append(safe_info_float(info, 'exec_action_norm', 0)); mins.append(safe_info_float(info, 'min_h', np.nan)); cbfs.append(safe_info_float(info, 'cbf_violation', 0)); sv.append(safe_info_float(info, 'safety_violation', 0)); cv.append(safe_info_float(info, 'constraint_violation', 0)); sc_ratio.append(safe_info_float(info, 'safe_candidate_ratio', 0.0)); emergency.append(safe_info_float(info, 'emergency_active', 0.0)); gh.append(safe_info_float(info, 'global_min_h', np.nan)); fh.append(safe_info_float(info, 'front_h', np.nan)); lh.append(safe_info_float(info, 'left_h', np.nan)); rh.append(safe_info_float(info, 'right_h', np.nan))
-        success=safe_info_float(info, 'is_success', safe_info_float(info, 'success', safe_info_float(info, 'goal_met', safe_info_float(info, 'task_success', 0.0))))
-        ms.append(dict(return_=ret, episode_length=l, success_rate=success, cost_return=float(np.sum(costs)), cost_rate=float(np.mean(np.array(costs)>0)) if costs else 0.0, safety_violation_rate=float(np.mean(sv)) if sv else 0.0, constraint_violation_rate=float(np.mean(cv)) if cv else 0.0, FAR=float(np.mean(fars)) if fars else 0.0, APR=float(np.mean(aprs)) if aprs else 0.0, projection_cost=float(np.mean(np.square(aprs))) if aprs else 0.0, raw_action_norm=float(np.mean(rns)) if rns else 0.0, exec_action_norm=float(np.mean(ens)) if ens else 0.0, min_h=safe_nanmean(mins) if mins else np.nan, cbf_violation_rate=float(np.mean(cbfs)) if cbfs else 0.0, safe_candidate_ratio=float(np.mean(sc_ratio)) if sc_ratio else 0.0, emergency_rate=float(np.mean(emergency)) if emergency else 0.0, global_min_h=safe_nanmean(gh) if gh else np.nan, front_h=safe_nanmean(fh) if fh else np.nan, left_h=safe_nanmean(lh) if lh else np.nan, right_h=safe_nanmean(rh) if rh else np.nan))
+            costs.append(safe_info_float(info, 'cost', 0)); fars.append(safe_info_float(info, 'filter_active', 0)); aprs.append(safe_info_float(info, 'projection_residual', 0)); rns.append(safe_info_float(info, 'raw_action_norm', 0)); ens.append(safe_info_float(info, 'exec_action_norm', 0)); mins.append(safe_info_float(info, 'min_h', np.nan)); cbfs.append(safe_info_float(info, 'cbf_violation', 0)); sv.append(safe_info_float(info, 'safety_violation', 0)); cv.append(safe_info_float(info, 'constraint_violation', 0)); sc_ratio.append(safe_info_float(info, 'safe_candidate_ratio', 0.0)); emergency.append(safe_info_float(info, 'emergency_active', 0.0)); gh.append(safe_info_float(info, 'global_min_h', np.nan)); fh.append(safe_info_float(info, 'front_h', np.nan)); lh.append(safe_info_float(info, 'left_h', np.nan)); rh.append(safe_info_float(info, 'right_h', np.nan)); goal_dists.append(safe_info_float(info, 'goal_dist', np.nan)); goal_met_steps.append(safe_info_float(info, 'goal_met', 0.0)); goal_reached_steps.append(safe_info_float(info, 'goal_reached_by_dist', 0.0))
+        goal_met_ep=safe_info_float(info, 'goal_met', 0.0)
+        goal_reached_ep=safe_info_float(info, 'goal_reached_by_dist', 0.0)
+        success=max(safe_info_float(info, 'is_success', 0.0), goal_met_ep, goal_reached_ep)
+        ms.append(dict(return_=ret, episode_length=l, success_rate=success, cost_return=float(np.sum(costs)), cost_rate=float(np.mean(np.array(costs)>0)) if costs else 0.0, safety_violation_rate=float(np.mean(sv)) if sv else 0.0, constraint_violation_rate=float(np.mean(cv)) if cv else 0.0, FAR=float(np.mean(fars)) if fars else 0.0, APR=float(np.mean(aprs)) if aprs else 0.0, projection_cost=float(np.mean(np.square(aprs))) if aprs else 0.0, raw_action_norm=float(np.mean(rns)) if rns else 0.0, exec_action_norm=float(np.mean(ens)) if ens else 0.0, min_h=safe_nanmean(mins) if mins else np.nan, cbf_violation_rate=float(np.mean(cbfs)) if cbfs else 0.0, safe_candidate_ratio=float(np.mean(sc_ratio)) if sc_ratio else 0.0, emergency_rate=float(np.mean(emergency)) if emergency else 0.0, global_min_h=safe_nanmean(gh) if gh else np.nan, front_h=safe_nanmean(fh) if fh else np.nan, left_h=safe_nanmean(lh) if lh else np.nan, right_h=safe_nanmean(rh) if rh else np.nan, goal_dist_mean=safe_nanmean(goal_dists), goal_dist_final=safe_info_float(info, 'goal_dist', np.nan), goal_met_rate=goal_met_ep, goal_reached_by_dist_rate=goal_reached_ep))
     out={k:safe_nanmean([m[k] for m in ms]) for k in ms[0].keys()}
     out['safety_score']=out['cost_return']+10.0*out['safety_violation_rate']+out['FAR']+0.1*out['APR']
     return out
@@ -174,15 +178,17 @@ def rollout_eval_trajectories(agent, args, env, save_dir, step):
             done = term or trunc
             exec_action = np.asarray(info.get("exec_action", raw), dtype=np.float32)
             ego = safe_filter._extract_ego_state_from_env(env) if safe_filter is not None else {"pos": np.zeros(2, np.float32)}
-            records.append({"t": l, "ego_x": float(ego["pos"][0]), "ego_y": float(ego["pos"][1]), "raw_action": raw, "exec_action": exec_action, "reward": float(reward), "cost": safe_info_float(info, "cost", 0.0), "filter_active": safe_info_float(info, "filter_active", 0.0), "projection_residual": safe_info_float(info, "projection_residual", 0.0), "raw_action_norm": safe_info_float(info, "raw_action_norm", 0.0), "exec_action_norm": safe_info_float(info, "exec_action_norm", 0.0), "current_min_h": safe_info_float(info, "current_min_h", np.nan), "predicted_min_h": safe_info_float(info, "predicted_min_h", np.nan), "emergency_active": safe_info_float(info, "emergency_active", 0.0), "safe_candidate_ratio": safe_info_float(info, "safe_candidate_ratio", np.nan)})
+            records.append({"t": l, "ego_x": float(ego["pos"][0]), "ego_y": float(ego["pos"][1]), "raw_action": raw, "exec_action": exec_action, "reward": float(reward), "cost": safe_info_float(info, "cost", 0.0), "filter_active": safe_info_float(info, "filter_active", 0.0), "projection_residual": safe_info_float(info, "projection_residual", 0.0), "raw_action_norm": safe_info_float(info, "raw_action_norm", 0.0), "exec_action_norm": safe_info_float(info, "exec_action_norm", 0.0), "current_min_h": safe_info_float(info, "current_min_h", np.nan), "predicted_min_h": safe_info_float(info, "predicted_min_h", np.nan), "emergency_active": safe_info_float(info, "emergency_active", 0.0), "safe_candidate_ratio": safe_info_float(info, "safe_candidate_ratio", np.nan), "goal_dist": safe_info_float(info, "goal_dist", np.nan), "goal_met": safe_info_float(info, "goal_met", 0.0), "goal_reached_by_dist": safe_info_float(info, "goal_reached_by_dist", 0.0)})
             l += 1
             ret += float(reward)
             costs.append(safe_info_float(info, "cost", 0.0)); fars.append(safe_info_float(info, "filter_active", 0.0)); aprs.append(safe_info_float(info, "projection_residual", 0.0))
-        succ = safe_info_float(info, "is_success", safe_info_float(info, "success", safe_info_float(info, "goal_met", safe_info_float(info, "task_success", 0.0))))
-        summary = dict(return_=ret, cost_return=float(np.sum(costs)), FAR=float(np.mean(fars)) if fars else 0.0, APR=float(np.mean(aprs)) if aprs else 0.0, success=succ)
+        goal_met = safe_info_float(info, "goal_met", 0.0)
+        goal_reached = safe_info_float(info, "goal_reached_by_dist", 0.0)
+        succ = max(safe_info_float(info, "is_success", 0.0), goal_met, goal_reached)
+        summary = dict(return_=ret, cost_return=float(np.sum(costs)), FAR=float(np.mean(fars)) if fars else 0.0, APR=float(np.mean(aprs)) if aprs else 0.0, success=succ, final_goal_dist=safe_info_float(info, "goal_dist", np.nan), goal_met=goal_met)
         prefix = out_dir / f"ep{ep:03d}"
         save_records(records, prefix)
-        title = f"{args.env_id} ep={ep} return={summary['return_']:.2f} cost={summary['cost_return']:.2f} FAR={summary['FAR']:.3f} APR={summary['APR']:.3f} success={summary['success']:.2f}"
+        title = f"{args.env_id} ep={ep} return={summary['return_']:.2f} cost={summary['cost_return']:.2f} FAR={summary['FAR']:.3f} APR={summary['APR']:.3f} final_goal_dist={summary['final_goal_dist']:.3f} goal_met={summary['goal_met']:.2f} success={summary['success']:.2f}"
         plot_safetygym_eval_trajectory(records, scene, save_path=str(prefix) + "_trajectory.png", title=title, arrow_stride=args.eval_traj_stride)
         plot_safetygym_eval_diagnostics(records, save_path=str(prefix) + "_diagnostics.png", title=title)
     return out_dir
@@ -240,6 +246,10 @@ if __name__=='__main__':
                 "predicted_min_h": safe_info_float(info, "predicted_min_h", np.nan),
                 "filter_active_005": safe_info_float(info, "filter_active_005", np.nan),
                 "filter_active_010": safe_info_float(info, "filter_active_010", np.nan),
+                "goal_known": safe_info_float(info, "goal_known", np.nan),
+                "goal_dist": safe_info_float(info, "goal_dist", np.nan),
+                "goal_met": safe_info_float(info, "goal_met", 0.0),
+                "goal_reached_by_dist": safe_info_float(info, "goal_reached_by_dist", 0.0),
             }
             step_metrics.append(row)
             if term or trunc: obs,_=env.reset()

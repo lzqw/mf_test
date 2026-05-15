@@ -2,7 +2,7 @@ import gymnasium as gym
 import numpy as np
 import safety_gymnasium
 
-from relax.safety.safety_gym_filter import SafetyGymFilterConfig, SafetyGymHardFilter
+from relax.safety.safety_gym_filter import SafetyGymFilterConfig, SafetyGymHardFilter, _extract_goal_from_env
 
 
 def _default_filter_info(raw_action: np.ndarray, exec_action: np.ndarray):
@@ -34,14 +34,16 @@ def _default_filter_info(raw_action: np.ndarray, exec_action: np.ndarray):
 
 class SafeSafetyGymWrapper(gym.Wrapper):
     def __init__(self, env_id="SafetyPointGoal1-v0", use_filter=True, filter_type="hybrid", filter_cfg=None,
-                 render_mode=None, terminate_on_safety_violation=False, cost_limit_per_step=0.0, **env_kwargs):
+                 render_mode=None, terminate_on_safety_violation=False, cost_limit_per_step=0.0, goal_threshold=None, **env_kwargs):
         env = safety_gymnasium.make(env_id, render_mode=render_mode, **env_kwargs)
         super().__init__(env)
         self.env_id = env_id
         self.use_filter = use_filter
         self.terminate_on_safety_violation = terminate_on_safety_violation
         self.cost_limit_per_step = float(cost_limit_per_step)
-        self.safe_filter = SafetyGymHardFilter(filter_cfg or SafetyGymFilterConfig(), filter_type=filter_type)
+        cfg = filter_cfg or SafetyGymFilterConfig()
+        self.safe_filter = SafetyGymHardFilter(cfg, filter_type=filter_type)
+        self.goal_threshold = float(cfg.goal_threshold if goal_threshold is None else goal_threshold)
         self.last_obs = None
         self.last_info = {}
         self.prev_exec_action = np.zeros(self.action_space.shape, dtype=np.float32)
@@ -83,7 +85,26 @@ class SafeSafetyGymWrapper(gym.Wrapper):
         info["raw_action"] = raw_action
         info["exec_action"] = exec_action
         info.setdefault("state_violation", info["safety_violation"])
-        info.setdefault("is_success", float(info.get("success", info.get("goal_met", info.get("task_success", 0.0)))))
+
+        ego = self.safe_filter._extract_ego_state_from_env(self.env)
+        goal = _extract_goal_from_env(self.env)
+        goal_known = bool(ego.get("known", False) and goal.get("known", False))
+        goal_dist = np.nan
+        if goal_known:
+            goal_dist = float(np.linalg.norm(np.asarray(ego["pos"], dtype=np.float32) - np.asarray(goal["pos"], dtype=np.float32)))
+
+        has_goal_flag = any(k in info for k in ("goal_met", "success", "task_success"))
+        goal_met = float(info.get("goal_met", info.get("success", info.get("task_success", 0.0))))
+        goal_reached_by_dist = float(goal_known and np.isfinite(goal_dist) and goal_dist < self.goal_threshold) if not has_goal_flag else float(info.get("goal_reached_by_dist", 0.0))
+
+        info["goal_known"] = float(goal_known)
+        info["goal_x"] = float(goal["pos"][0]) if goal.get("known", False) else np.nan
+        info["goal_y"] = float(goal["pos"][1]) if goal.get("known", False) else np.nan
+        info["goal_dist"] = float(goal_dist) if np.isfinite(goal_dist) else np.nan
+        info["goal_met"] = goal_met
+        info["goal_reached_by_dist"] = goal_reached_by_dist
+        info["is_success"] = max(float(info.get("is_success", 0.0)), goal_met, goal_reached_by_dist)
+
         info.update(filter_info)
 
         if self.terminate_on_safety_violation and cost > self.cost_limit_per_step:

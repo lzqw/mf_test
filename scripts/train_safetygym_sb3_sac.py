@@ -57,6 +57,9 @@ def evaluate(model, env, eval_episodes: int, seed: int) -> Dict[str, float]:
         constraint_viol = []
         raw_norms = []
         exec_norms = []
+        goal_dists = []
+        goal_met_steps = []
+        goal_reached_steps = []
         info = {}
 
         while not done:
@@ -70,12 +73,13 @@ def evaluate(model, env, eval_episodes: int, seed: int) -> Dict[str, float]:
             constraint_viol.append(_safe_info_float(info, "constraint_violation", 0.0))
             raw_norms.append(_safe_info_float(info, "raw_action_norm", 0.0))
             exec_norms.append(_safe_info_float(info, "exec_action_norm", 0.0))
+            goal_dists.append(_safe_info_float(info, "goal_dist", np.nan))
+            goal_met_steps.append(_safe_info_float(info, "goal_met", 0.0))
+            goal_reached_steps.append(_safe_info_float(info, "goal_reached_by_dist", 0.0))
 
-        success = _safe_info_float(
-            info,
-            "is_success",
-            _safe_info_float(info, "success", _safe_info_float(info, "goal_met", _safe_info_float(info, "task_success", 0.0))),
-        )
+        goal_met = _safe_info_float(info, "goal_met", 0.0)
+        goal_reached = _safe_info_float(info, "goal_reached_by_dist", 0.0)
+        success = max(_safe_info_float(info, "is_success", 0.0), goal_met, goal_reached)
 
         per_ep.append(
             {
@@ -88,6 +92,10 @@ def evaluate(model, env, eval_episodes: int, seed: int) -> Dict[str, float]:
                 "constraint_violation_rate": float(np.mean(constraint_viol)) if constraint_viol else 0.0,
                 "raw_action_norm": float(np.mean(raw_norms)) if raw_norms else 0.0,
                 "exec_action_norm": float(np.mean(exec_norms)) if exec_norms else 0.0,
+                "goal_dist_mean": float(np.nanmean(np.asarray(goal_dists, dtype=np.float32))) if goal_dists else np.nan,
+                "goal_dist_final": _safe_info_float(info, "goal_dist", np.nan),
+                "goal_met_rate": goal_met,
+                "goal_reached_by_dist_rate": goal_reached,
             }
         )
 
@@ -123,12 +131,18 @@ def rollout_eval_trajectories(model, env, args, step: int) -> Optional[Path]:
                     "raw_action_norm": _safe_info_float(info, "raw_action_norm", 0.0),
                     "exec_action_norm": _safe_info_float(info, "exec_action_norm", 0.0),
                     "emergency_active": _safe_info_float(info, "emergency_active", 0.0),
+                    "goal_dist": _safe_info_float(info, "goal_dist", np.nan),
+                    "goal_met": _safe_info_float(info, "goal_met", 0.0),
+                    "goal_reached_by_dist": _safe_info_float(info, "goal_reached_by_dist", 0.0),
                 }
             )
             t += 1
         prefix = out_dir / f"ep{ep:03d}"
         save_records(records, prefix)
-        title = f"{args.env_id} step={step} ep={ep}"
+        goal_met = _safe_info_float(info, "goal_met", 0.0)
+        goal_reached = _safe_info_float(info, "goal_reached_by_dist", 0.0)
+        succ = max(_safe_info_float(info, "is_success", 0.0), goal_met, goal_reached)
+        title = f"{args.env_id} step={step} ep={ep} final_goal_dist={_safe_info_float(info, "goal_dist", np.nan):.3f} goal_met={goal_met:.2f} success={succ:.2f}"
         plot_safetygym_eval_trajectory(records, scene, save_path=str(prefix) + "_trajectory.png", title=title, arrow_stride=args.eval_traj_stride)
         plot_safetygym_eval_diagnostics(records, save_path=str(prefix) + "_diagnostics.png", title=title)
     return out_dir

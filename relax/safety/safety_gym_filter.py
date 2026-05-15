@@ -35,6 +35,60 @@ def _iter_collection(value):
     return [value]
 
 
+def _extract_goal_from_env(env):
+    unknown = {"known": False, "pos": np.zeros(2, dtype=np.float32), "source": "unknown"}
+    if env is None:
+        return unknown
+    u = getattr(env, "unwrapped", env)
+
+    def _from_any(value, source):
+        if value is None:
+            return None
+        xy = _to_xy(value)
+        if xy is not None:
+            return {"known": True, "pos": xy, "source": source}
+        for attr in ["pos", "position", "body_pos"]:
+            xy = _to_xy(getattr(value, attr, None))
+            if xy is not None:
+                return {"known": True, "pos": xy, "source": f"{source}.{attr}"}
+        for m in ["get_position", "get_xy_position"]:
+            fn = getattr(value, m, None)
+            if callable(fn):
+                try:
+                    xy = _to_xy(fn())
+                except Exception:
+                    xy = None
+                if xy is not None:
+                    return {"known": True, "pos": xy, "source": f"{source}.{m}()"}
+        return None
+
+    roots = [
+        "task.goal", "task.goal.pos", "task.goal.position", "task.goal.body_pos",
+        "task.goal.get_position", "task.goal.get_xy_position",
+        "task.goal_pos", "task.goal_position", "task.goal_xy",
+        "goal", "goal_pos", "goal_position",
+    ]
+    for path in roots:
+        v = _get_attr_path(u, path)
+        if callable(v):
+            try:
+                v = v()
+            except Exception:
+                v = None
+        got = _from_any(v, path + ('()' if callable(_get_attr_path(u, path)) else ''))
+        if got is not None:
+            return got
+
+    for coll_path in ["task.goals", "goals", "task.goal"]:
+        v = _get_attr_path(u, coll_path)
+        for item in _iter_collection(v):
+            got = _from_any(item, f"{coll_path}[]")
+            if got is not None:
+                return got
+
+    return unknown
+
+
 @dataclass
 class SafetyGymFilterConfig:
     max_action_norm_point: float = 0.80
@@ -58,6 +112,7 @@ class SafetyGymFilterConfig:
     shield_horizon: int = 1
     gt_action_grid_size: int = 31
     gt_eps: float = 1e-6
+    goal_threshold: float = 0.30
     eps: float = 1e-6
 
 
