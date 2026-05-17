@@ -162,6 +162,10 @@ def main():
     p.add_argument('--forward_candidate_throttles',type=str,default='0.25,0.45')
     p.add_argument('--forward_candidate_steers',type=str,default='0.0,0.10,-0.10')
     p.add_argument('--entropy_reg_mode',choices=['legacy','likelihood_tn','flac_tn'],default='legacy'); p.add_argument('--use_tn_energy',action='store_true'); p.add_argument('--candidate_temp',type=float,default=0.1); p.add_argument('--beta_normal_entropy',type=float,default=1.0); p.add_argument('--min_effective_entropy',type=float,default=-20.0); p.add_argument('--target_effective_entropy',type=float,default=1.0); p.add_argument('--normal_energy_coef',type=float,default=0.05); p.add_argument('--weight_mix',type=float,default=0.05)
+    p.add_argument('--safety_reward_penalty', type=float, default=0.0)
+    p.add_argument('--penalize_out_of_road', action=argparse.BooleanOptionalAction, default=True)
+    p.add_argument('--penalize_crash', action=argparse.BooleanOptionalAction, default=True)
+    p.add_argument('--penalize_terminated_by_safety', action=argparse.BooleanOptionalAction, default=True)
     p.add_argument('--render_train',action=argparse.BooleanOptionalAction,default=False); p.add_argument('--render_mode',choices=['topdown','human'],default='topdown'); p.add_argument('--render_every',type=int,default=1); p.add_argument('--topdown_size',type=int,default=800); p.add_argument('--render_window',action=argparse.BooleanOptionalAction,default=True)
     args=p.parse_args(); np.random.seed(args.seed)
     args.forward_candidate_throttles = parse_float_tuple(args.forward_candidate_throttles)
@@ -286,7 +290,17 @@ def main():
     for step in pbar:
         if step<args.start_steps: raw=env.action_space.sample()
         else: key,ak=jax.random.split(key); raw=np.asarray(agent.get_action(ak,obs[None])[0])
-        nobs,reward,term,trunc,info=env.step(raw); exp=SafePullbackExperience.create(obs,raw,info['exec_action'],reward,term,trunc,nobs,info); buf.append(exp); buf=buf[-1_000_000:]; obs=nobs
+        nobs,reward,term,trunc,info=env.step(raw)
+        safety_penalty_flag = 0.0
+        if args.penalize_out_of_road:
+            safety_penalty_flag = max(safety_penalty_flag, float(info.get("out_of_road", 0.0)))
+        if args.penalize_crash:
+            safety_penalty_flag = max(safety_penalty_flag, float(info.get("crash", 0.0)))
+        if args.penalize_terminated_by_safety:
+            safety_penalty_flag = max(safety_penalty_flag, float(info.get("terminated_by_safety", 0.0)))
+            safety_penalty_flag = max(safety_penalty_flag, float(info.get("safety_failure", 0.0)))
+        train_reward = float(reward) - args.safety_reward_penalty * safety_penalty_flag
+        exp=SafePullbackExperience.create(obs,raw,info['exec_action'],train_reward,term,trunc,nobs,info); buf.append(exp); buf=buf[-1_000_000:]; obs=nobs
         if args.render_train and step % args.render_every == 0:
             try:
                 if args.render_mode == "topdown":
@@ -316,6 +330,9 @@ def main():
                 continue
             if is_finite_number(v):
                 writer.add_scalar(f"train_env_info/{k}", float(v), step)
+        writer.add_scalar("train_env/train_reward", float(train_reward), step)
+        writer.add_scalar("train_env/safety_reward_penalty_flag", float(safety_penalty_flag), step)
+        writer.add_scalar("train_env/safety_reward_penalty_value", float(args.safety_reward_penalty * safety_penalty_flag), step)
         if step>=args.update_after and len(buf)>=args.batch_size:
             key,uk=jax.random.split(key); out=agent.update(uk,sample_batch(buf,args.batch_size)); out['step']=step; train.append(out)
             for k,v in out.items():
