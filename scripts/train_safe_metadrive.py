@@ -44,7 +44,8 @@ def make_algo(args, obs_dim, act_dim):
         min_effective_entropy=args.min_effective_entropy, target_effective_entropy=args.target_effective_entropy,
         normal_energy_coef=args.normal_energy_coef, weight_mix=args.weight_mix, residual_radius=args.residual_radius, action_limit=1.0,
         num_uniform_candidates=args.num_uniform_candidates, include_zero_candidate=args.include_zero_candidate,
-        local_candidate_noise_scale=args.local_candidate_noise_scale, num_forward_candidates=args.num_forward_candidates,
+        include_exec_candidate=args.include_exec_candidate, num_exec_local_candidates=args.num_exec_local_candidates,
+        exec_candidate_noise_scale=args.exec_candidate_noise_scale, local_candidate_noise_scale=args.local_candidate_noise_scale, num_forward_candidates=args.num_forward_candidates,
         forward_candidate_throttles=args.forward_candidate_throttles, forward_candidate_steers=args.forward_candidate_steers)
 
 def is_finite_number(x):
@@ -153,6 +154,9 @@ def main():
     p.add_argument('--use_directional_noise',action=argparse.BooleanOptionalAction,default=False)
     p.add_argument('--num_uniform_candidates',type=int,default=0)
     p.add_argument('--include_zero_candidate',action=argparse.BooleanOptionalAction,default=True)
+    p.add_argument('--include_exec_candidate',action=argparse.BooleanOptionalAction,default=True)
+    p.add_argument('--num_exec_local_candidates',type=int,default=8)
+    p.add_argument('--exec_candidate_noise_scale',type=float,default=0.03)
     p.add_argument('--local_candidate_noise_scale',type=float,default=-1.0)
     p.add_argument('--num_forward_candidates',type=int,default=0)
     p.add_argument('--forward_candidate_throttles',type=str,default='0.25,0.45')
