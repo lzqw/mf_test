@@ -38,6 +38,7 @@ class SafePullbackRF2SACENTMetaDrive(Algorithm):
                  normal_energy_coef=0.05, target_safe_energy=0.05,
                  safe_iso_coef=0.05, safe_energy_variant="normal_iso", weight_mix=0.05, residual_radius=0.35, action_limit=1.0,
                  num_uniform_candidates: int = 0, include_zero_candidate: bool = True, local_candidate_noise_scale: float = -1.0,
+                 include_exec_candidate: bool = True, num_exec_local_candidates: int = 8, exec_candidate_noise_scale: float = 0.03,
                  num_forward_candidates: int = 0, forward_candidate_throttles: tuple = (0.25, 0.45),
                  forward_candidate_steers: tuple = (0.0, 0.10, -0.10)):
         self.agent = agent
@@ -82,6 +83,9 @@ class SafePullbackRF2SACENTMetaDrive(Algorithm):
         self.num_uniform_candidates = int(num_uniform_candidates)
         self.include_zero_candidate = bool(include_zero_candidate)
         self.local_candidate_noise_scale = float(local_candidate_noise_scale)
+        self.include_exec_candidate = bool(include_exec_candidate)
+        self.num_exec_local_candidates = int(num_exec_local_candidates)
+        self.exec_candidate_noise_scale = float(exec_candidate_noise_scale)
         self.num_forward_candidates = int(num_forward_candidates)
         self.forward_candidate_throttles = tuple(float(x) for x in forward_candidate_throttles)
         self.forward_candidate_steers = tuple(float(x) for x in forward_candidate_steers)
@@ -250,12 +254,14 @@ class SafePullbackRF2SACENTMetaDrive(Algorithm):
             # -------- Candidate actions for Q-weighted flow update --------
             batch_size = obs.shape[0]
             act_dim = raw_action.shape[-1]
-            k_t, k_local, k_rand, k_flow_noise = jax.random.split(k2, 4)
+            k_t, k_local_exec, k_local_raw, k_rand, k_flow_noise = jax.random.split(k2, 5)
             K = self.K
 
             fixed_candidates = [raw_action[:, None, :]]
             if self.include_zero_candidate:
                 fixed_candidates.append(jnp.zeros_like(raw_action)[:, None, :])
+            if self.include_exec_candidate:
+                fixed_candidates.append(exec_action[:, None, :])
 
             n_forward = 0
             if self.num_forward_candidates > 0:
@@ -276,12 +282,18 @@ class SafePullbackRF2SACENTMetaDrive(Algorithm):
                     forward_actions = jnp.repeat(forward_actions[None, :, :], batch_size, axis=0)
                     fixed_candidates.append(forward_actions)
 
+            n_exec_local = min(max(self.num_exec_local_candidates, 0), max(K - sum(c.shape[1] for c in fixed_candidates), 0))
+            if n_exec_local > 0:
+                exec_local_noise = self.exec_candidate_noise_scale * jax.random.normal(k_local_exec, (batch_size, n_exec_local, act_dim))
+                exec_local = jnp.clip(exec_action[:, None, :] + exec_local_noise, -1.0, 1.0)
+                fixed_candidates.append(exec_local)
+
             n_fixed = sum(c.shape[1] for c in fixed_candidates)
             n_uniform = min(max(self.num_uniform_candidates, 0), max(K - n_fixed, 0))
             n_local = max(K - n_fixed - n_uniform, 0)
 
             local_std = self.agent.noise_scale if self.local_candidate_noise_scale < 0 else self.local_candidate_noise_scale
-            local_noise = local_std * jax.random.normal(k_local, (batch_size, n_local, act_dim))
+            local_noise = local_std * jax.random.normal(k_local_raw, (batch_size, n_local, act_dim))
             local_clean = jnp.clip(raw_action[:, None, :] + local_noise, -1.0, 1.0)
             uniform_clean = jax.random.uniform(k_rand, (batch_size, n_uniform, act_dim), minval=-1.0, maxval=1.0)
             clean = jnp.concatenate(fixed_candidates + [local_clean, uniform_clean], axis=1)
@@ -417,8 +429,12 @@ class SafePullbackRF2SACENTMetaDrive(Algorithm):
                         local_candidate_fraction=jnp.float32(n_local / self.K),
                         fixed_candidate_fraction=jnp.float32(n_fixed / self.K),
                         forward_candidate_fraction=jnp.float32(n_forward / self.K),
+                        exec_candidate_fraction=jnp.float32((1 if self.include_exec_candidate else 0) / self.K),
+                        exec_local_candidate_fraction=jnp.float32(n_exec_local / self.K),
                         num_forward_candidates=jnp.float32(n_forward),
+                        num_exec_local_candidates=jnp.float32(n_exec_local),
                         local_candidate_noise_scale=jnp.float32(local_std),
+                        exec_candidate_noise_scale=jnp.float32(self.exec_candidate_noise_scale),
                         tn_energy=tn_energy, tn_normal_energy=tn_normal_energy,
                         tn_tangent_energy=tn_tangent_energy, tn_gate_mean=tn_gate_mean,
                         tn_residual_xt_mean=tn_residual_xt_mean,
