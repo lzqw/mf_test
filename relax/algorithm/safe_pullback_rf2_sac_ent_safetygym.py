@@ -340,18 +340,32 @@ class SafePullbackRF2SACENTSafetyGym(Algorithm):
                 flow_loss = self.agent.flow.reverse_weighted_p_loss2(denoiser, t_r, noisy_r, jax.lax.stop_gradient(w_r), jax.lax.stop_gradient(u_r))
                 qp_penalty = jnp.mean(self.agent.get_qp(p.qp, obs_r, noisy_r))
                 residual = jnp.sqrt(jnp.maximum(self.agent.get_qp(p.qp, obs_r, noisy_r), 0.0))
+
+                actor_safe = jnp.float32(0.0)
+                tn_normal = qp_penalty
+                tn_tangent = jnp.float32(0.0)
+                tn_gate = jnp.float32(0.0)
+                tn_residual_xt = jnp.mean(residual)
+                safe_energy_actor = qp_penalty
+
                 if self.use_tn_energy:
                     if self.use_filter_surrogate:
                         v_pred = self.agent.policy(pp, obs_r, noisy_r, t_r)
                         e_n, e_t, e_iso, gate, residual_xt = compute_surrogate_filter_energy(obs_r, noisy_r, v_pred)
                         actor_safe_surrogate = jnp.mean(e_n + e_t) if self.safe_energy_variant == "normal_tangent" else jnp.mean(e_n + self.safe_iso_coef * e_iso)
                         actor_safe = surrogate_gate * actor_safe_surrogate + (1.0 - surrogate_gate) * qp_penalty
-                        safe_scale = alpha * self.tn_coef if self.safe_actor_scale_mode == "alpha" else jnp.float32(self.actor_safe_coef)
-                        base_loss = flow_loss + safe_scale * actor_safe
-                        return base_loss, (flow_loss, actor_safe, jnp.mean(e_n), jnp.mean(e_t), jnp.mean(gate), jnp.mean(residual_xt), actor_safe_surrogate)
+                        tn_normal = jnp.mean(e_n)
+                        tn_tangent = jnp.mean(e_t)
+                        tn_gate = jnp.mean(gate)
+                        tn_residual_xt = jnp.mean(residual_xt)
+                        safe_energy_actor = actor_safe_surrogate
+                    else:
+                        actor_safe = qp_penalty
                     safe_scale = alpha * self.tn_coef if self.safe_actor_scale_mode == "alpha" else jnp.float32(self.actor_safe_coef)
-                    base_loss = flow_loss + safe_scale * qp_penalty
-                    return base_loss, (flow_loss, qp_penalty, qp_penalty, jnp.float32(0.0), jnp.float32(0.0), jnp.mean(residual), qp_penalty)
+                else:
+                    actor_safe = jnp.float32(0.0)
+                    safe_scale = jnp.float32(0.0)
+
                 exec_bc_loss = jnp.float32(0.0)
                 if self.exec_bc_coef > 0.0:
                     k_bc_t, k_bc_n = jax.random.split(k2)
@@ -361,20 +375,18 @@ class SafePullbackRF2SACENTSafetyGym(Algorithm):
                     u_bc = exec_action - noise_bc
                     v_bc = self.agent.policy(pp, obs, x_t_bc, t_bc.squeeze(-1))
                     exec_bc_loss = jnp.mean((v_bc - u_bc) ** 2)
+
                 self_exec_loss = jnp.float32(0.0)
                 if self.self_exec_coef > 0.0 and self.use_filter_surrogate:
                     a_pi = self.agent.get_action(k2, (pp, p.log_alpha, p.q1, p.q2), obs)
                     a_exec_hat = jax.lax.stop_gradient(self.agent.get_exec_action_hat(p.g, obs, a_pi))
                     self_exec_loss = jnp.mean(jnp.sum((a_pi - a_exec_hat) ** 2, axis=-1))
-                total = flow_loss + self.exec_bc_coef * exec_bc_loss + self.self_exec_coef * self_exec_loss
-                return total, (flow_loss, jnp.float32(0.0), qp_penalty, jnp.float32(0.0), jnp.float32(0.0), jnp.mean(residual), qp_penalty, exec_bc_loss, self_exec_loss)
+
+                total = flow_loss + safe_scale * actor_safe + self.exec_bc_coef * exec_bc_loss + self.self_exec_coef * self_exec_loss
+                return total, (flow_loss, actor_safe, tn_normal, tn_tangent, tn_gate, tn_residual_xt, safe_energy_actor, exec_bc_loss, self_exec_loss)
 
             (policy_loss, p_aux), policy_grads = jax.value_and_grad(ploss, has_aux=True)(p.policy)
-            extra_exec_bc = jnp.float32(0.0); extra_self_exec = jnp.float32(0.0)
-            if len(p_aux) >= 9:
-                _, tn_energy, tn_normal_energy, tn_tangent_energy, tn_gate_mean, tn_residual_xt_mean, safe_energy_actor_mean, extra_exec_bc, extra_self_exec = p_aux
-            else:
-                _, tn_energy, tn_normal_energy, tn_tangent_energy, tn_gate_mean, tn_residual_xt_mean, safe_energy_actor_mean = p_aux
+            _, tn_energy, tn_normal_energy, tn_tangent_energy, tn_gate_mean, tn_residual_xt_mean, safe_energy_actor_mean, extra_exec_bc, extra_self_exec = p_aux
 
             alpha_loss_val = jnp.float32(0.0)
             if self.fixed_alpha:
