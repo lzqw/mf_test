@@ -40,7 +40,7 @@ class SafePullbackRF2SACENTMetaDrive(Algorithm):
                  num_uniform_candidates: int = 0, include_zero_candidate: bool = True, local_candidate_noise_scale: float = -1.0,
                  include_exec_candidate: bool = True, num_exec_local_candidates: int = 8, exec_candidate_noise_scale: float = 0.03,
                  num_forward_candidates: int = 0, forward_candidate_throttles: tuple = (0.25, 0.45),
-                 forward_candidate_steers: tuple = (0.0, 0.10, -0.10)):
+                 forward_candidate_steers: tuple = (0.0, 0.10, -0.10), qp_cf_coef: float = 0.1, qp_lb_coef: float = 0.5):
         self.agent = agent
         self.gamma = gamma
         self.gamma_p = gamma_p
@@ -89,6 +89,8 @@ class SafePullbackRF2SACENTMetaDrive(Algorithm):
         self.num_forward_candidates = int(num_forward_candidates)
         self.forward_candidate_throttles = tuple(float(x) for x in forward_candidate_throttles)
         self.forward_candidate_steers = tuple(float(x) for x in forward_candidate_steers)
+        self.qp_cf_coef = float(qp_cf_coef)
+        self.qp_lb_coef = float(qp_lb_coef)
 
         self.state = SafePullbackRF2TrainState(
             params=params,
@@ -222,7 +224,7 @@ class SafePullbackRF2SACENTMetaDrive(Algorithm):
                 q_cf = self.agent.get_qp(qp, cf_obs, cf_actions)
                 l_cf = jnp.mean((q_cf - jax.lax.stop_gradient(d_cf)) ** 2)
                 lb = jnp.mean(jax.nn.relu(projection_cost - pred) ** 2)
-                total = td_loss + 0.5 * l_cf + 0.5 * lb
+                total = td_loss + self.qp_cf_coef * l_cf + self.qp_lb_coef * lb
                 aux = dict(pred=pred, td_loss=td_loss, l_cf=l_cf, lb=lb)
                 return total, aux
 
@@ -415,7 +417,7 @@ class SafePullbackRF2SACENTMetaDrive(Algorithm):
                         q_reward_mean=jnp.mean(q_reward), q_projection_mean=jnp.mean(q_proj),
                         projection_cost_batch=jnp.mean(projection_cost),
                         safe_pullback_score_mean=jnp.mean(score),
-                        qp_td_loss=qp_aux["td_loss"], qp_cf_loss=qp_aux["l_cf"], qp_lb_loss=qp_aux["lb"],
+                        qp_td_loss=qp_aux["td_loss"], qp_cf_loss=qp_aux["l_cf"], qp_lb_loss=qp_aux["lb"], qp_cf_coef=self.qp_cf_coef, qp_lb_coef=self.qp_lb_coef,
                         lambda_eff=lambda_eff, FAR_batch=far_batch, APR_batch=apr_batch,
                         candidate_q_reward_mean=jnp.mean(q_reward),
                         candidate_q_projection_mean=jnp.mean(q_proj),
