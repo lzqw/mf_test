@@ -451,7 +451,7 @@ class SafePullbackRF2SACENTSafetyGym(Algorithm):
                         raw_action_batch_std=jnp.mean(jnp.std(raw_action, axis=0)),
                         g_loss=g_loss, g_exec_mse=g_aux[0], g_exec_residual_mean=g_aux[1],
                         q_reward_raw_mean=jnp.mean(q_reward_raw), q_reward_exec_hat_mean=jnp.mean(q_reward),
-                        tangent_candidate_fraction=jnp.float32((2.0 + n_local) / self.K),
+                        tangent_candidate_fraction=jnp.float32((2.0 + n_raw_local + n_exec_local) / self.K),
                         uniform_candidate_fraction=jnp.float32(n_uniform / self.K),
                         goal_candidate_fraction=jnp.float32(1.0 / self.K),
                         exec_candidate_fraction=jnp.float32((1.0 if self.include_exec_candidate else 0.0) / self.K),
