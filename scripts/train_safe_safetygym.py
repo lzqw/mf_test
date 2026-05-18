@@ -142,20 +142,39 @@ def save_partial_outputs(log_dir, train_metrics, eval_metrics, step_metrics, age
     _save_csv(log_dir / "train_metrics.csv", train_metrics)
 
 def eval_agent(agent, args, env, eval_scene_seed=None):
+    goal_threshold = args.eval_goal_threshold
+    if goal_threshold is None:
+        goal_threshold = getattr(env, "goal_threshold", 0.30)
     ms=[]
     for ep in range(args.eval_episodes):
         reset_seed = eval_scene_seed if args.fixed_scene else (args.seed + 1000 + ep)
-        obs,_=env.reset(seed=reset_seed); done=False; ret=0; l=0; costs=[]; fars=[]; aprs=[]; rns=[]; ens=[]; mins=[]; cbfs=[]; sv=[]; cv=[]; sc_ratio=[]; emergency=[]; gh=[]; fh=[]; lh=[]; rh=[]; goal_dists=[]; goal_met_steps=[]; goal_reached_steps=[]; info={}
+        obs,_=env.reset(seed=reset_seed); done=False; ret=0; l=0; costs=[]; fars=[]; aprs=[]; rns=[]; ens=[]; mins=[]; cbfs=[]; sv=[]; cv=[]; sc_ratio=[]; emergency=[]; gh=[]; fh=[]; lh=[]; rh=[]; goal_dists=[]; goal_met_steps=[]; goal_reached_steps=[]; info={}; stopped_on_goal=0.0; hit_step=None
         while not done and l<1000:
             a=np.asarray(agent.get_action(jax.random.PRNGKey(args.seed+ep*10000+l),obs[None])[0]); obs,r,t,tr,info=env.step(a); done=t or tr; ret+=float(r); l+=1
-            costs.append(safe_info_float(info, 'cost', 0)); fars.append(safe_info_float(info, 'filter_active', 0)); aprs.append(safe_info_float(info, 'projection_residual', 0)); rns.append(safe_info_float(info, 'raw_action_norm', 0)); ens.append(safe_info_float(info, 'exec_action_norm', 0)); mins.append(safe_info_float(info, 'min_h', np.nan)); cbfs.append(safe_info_float(info, 'cbf_violation', 0)); sv.append(safe_info_float(info, 'safety_violation', 0)); cv.append(safe_info_float(info, 'constraint_violation', 0)); sc_ratio.append(safe_info_float(info, 'safe_candidate_ratio', 0.0)); emergency.append(safe_info_float(info, 'emergency_active', 0.0)); gh.append(safe_info_float(info, 'global_min_h', np.nan)); fh.append(safe_info_float(info, 'front_h', np.nan)); lh.append(safe_info_float(info, 'left_h', np.nan)); rh.append(safe_info_float(info, 'right_h', np.nan)); goal_dists.append(safe_info_float(info, 'goal_dist', np.nan)); goal_met_steps.append(safe_info_float(info, 'goal_met', 0.0)); goal_reached_steps.append(safe_info_float(info, 'goal_reached_by_dist', 0.0))
+            goal_dist = safe_info_float(info, 'goal_dist', np.nan)
+            goal_met = safe_info_float(info, 'goal_met', 0.0)
+            goal_reached = safe_info_float(info, 'goal_reached_by_dist', 0.0)
+            goal_hit = (goal_met > 0.0) or (goal_reached > 0.0) or (np.isfinite(goal_dist) and goal_dist < goal_threshold)
+            if hit_step is None and goal_hit:
+                hit_step = l
+            costs.append(safe_info_float(info, 'cost', 0)); fars.append(safe_info_float(info, 'filter_active', 0)); aprs.append(safe_info_float(info, 'projection_residual', 0)); rns.append(safe_info_float(info, 'raw_action_norm', 0)); ens.append(safe_info_float(info, 'exec_action_norm', 0)); mins.append(safe_info_float(info, 'min_h', np.nan)); cbfs.append(safe_info_float(info, 'cbf_violation', 0)); sv.append(safe_info_float(info, 'safety_violation', 0)); cv.append(safe_info_float(info, 'constraint_violation', 0)); sc_ratio.append(safe_info_float(info, 'safe_candidate_ratio', 0.0)); emergency.append(safe_info_float(info, 'emergency_active', 0.0)); gh.append(safe_info_float(info, 'global_min_h', np.nan)); fh.append(safe_info_float(info, 'front_h', np.nan)); lh.append(safe_info_float(info, 'left_h', np.nan)); rh.append(safe_info_float(info, 'right_h', np.nan)); goal_dists.append(goal_dist); goal_met_steps.append(goal_met); goal_reached_steps.append(goal_reached)
+            if args.eval_stop_on_goal and goal_hit:
+                done = True
+                stopped_on_goal = 1.0
+                info["eval_stopped_on_goal"] = 1.0
+                break
         goal_met_final = safe_info_float(info, 'goal_met', 0.0)
         goal_reached_final = safe_info_float(info, 'goal_reached_by_dist', 0.0)
         goal_met_any = float(np.max(goal_met_steps)) if goal_met_steps else 0.0
         goal_reached_by_dist_any = float(np.max(goal_reached_steps)) if goal_reached_steps else 0.0
         success=max(safe_info_float(info, 'is_success', 0.0), goal_met_any, goal_reached_by_dist_any)
-        ms.append(dict(return_=ret, episode_length=l, success_rate=success, cost_return=float(np.sum(costs)), cost_rate=float(np.mean(np.array(costs)>0)) if costs else 0.0, safety_violation_rate=float(np.mean(sv)) if sv else 0.0, constraint_violation_rate=float(np.mean(cv)) if cv else 0.0, FAR=float(np.mean(fars)) if fars else 0.0, APR=float(np.mean(aprs)) if aprs else 0.0, projection_cost=float(np.mean(np.square(aprs))) if aprs else 0.0, raw_action_norm=float(np.mean(rns)) if rns else 0.0, exec_action_norm=float(np.mean(ens)) if ens else 0.0, min_h=safe_nanmean(mins) if mins else np.nan, cbf_violation_rate=float(np.mean(cbfs)) if cbfs else 0.0, safe_candidate_ratio=float(np.mean(sc_ratio)) if sc_ratio else 0.0, emergency_rate=float(np.mean(emergency)) if emergency else 0.0, global_min_h=safe_nanmean(gh) if gh else np.nan, front_h=safe_nanmean(fh) if fh else np.nan, left_h=safe_nanmean(lh) if lh else np.nan, right_h=safe_nanmean(rh) if rh else np.nan, goal_dist_min=float(np.nanmin(np.asarray(goal_dists, dtype=np.float32))) if goal_dists else np.nan, goal_dist_mean=safe_nanmean(goal_dists), goal_dist_final=safe_info_float(info, 'goal_dist', np.nan), goal_met_any=goal_met_any, goal_reached_by_dist_any=goal_reached_by_dist_any, goal_met_final=goal_met_final, goal_reached_by_dist_final=goal_reached_final, goal_met_rate=goal_met_final, goal_reached_by_dist_rate=goal_reached_final, goal_met_any_rate=goal_met_any, goal_reached_by_dist_any_rate=goal_reached_by_dist_any))
+        if hit_step is None:
+            hit_step = l
+        ms.append(dict(return_=ret, episode_length=l, success_rate=success, cost_return=float(np.sum(costs)), cost_rate=float(np.mean(np.array(costs)>0)) if costs else 0.0, safety_violation_rate=float(np.mean(sv)) if sv else 0.0, constraint_violation_rate=float(np.mean(cv)) if cv else 0.0, FAR=float(np.mean(fars)) if fars else 0.0, APR=float(np.mean(aprs)) if aprs else 0.0, projection_cost=float(np.mean(np.square(aprs))) if aprs else 0.0, raw_action_norm=float(np.mean(rns)) if rns else 0.0, exec_action_norm=float(np.mean(ens)) if ens else 0.0, min_h=safe_nanmean(mins) if mins else np.nan, cbf_violation_rate=float(np.mean(cbfs)) if cbfs else 0.0, safe_candidate_ratio=float(np.mean(sc_ratio)) if sc_ratio else 0.0, emergency_rate=float(np.mean(emergency)) if emergency else 0.0, global_min_h=safe_nanmean(gh) if gh else np.nan, front_h=safe_nanmean(fh) if fh else np.nan, left_h=safe_nanmean(lh) if lh else np.nan, right_h=safe_nanmean(rh) if rh else np.nan, goal_dist_min=float(np.nanmin(np.asarray(goal_dists, dtype=np.float32))) if goal_dists else np.nan, goal_dist_mean=safe_nanmean(goal_dists), goal_dist_final=safe_info_float(info, 'goal_dist', np.nan), goal_met_any=goal_met_any, goal_reached_by_dist_any=goal_reached_by_dist_any, goal_met_final=goal_met_final, goal_reached_by_dist_final=goal_reached_final, goal_met_rate=goal_met_final, goal_reached_by_dist_rate=goal_reached_final, goal_met_any_rate=goal_met_any, goal_reached_by_dist_any_rate=goal_reached_by_dist_any, eval_stopped_on_goal=stopped_on_goal, hit_step=float(hit_step)))
     out={k:safe_nanmean([m[k] for m in ms]) for k in ms[0].keys()}
+    out['eval_stopped_on_goal_rate'] = out.get('eval_stopped_on_goal', 0.0)
+    out['hit_step_mean'] = out.get('hit_step', np.nan)
+    out['hit_step_final'] = out.get('hit_step', np.nan)
     out['safety_score']=out['cost_return']+10.0*out['safety_violation_rate']+out['FAR']+0.1*out['APR']
     return out
 
@@ -164,6 +183,7 @@ def rollout_eval_trajectories(agent, args, env, save_dir, step, eval_scene_seed=
     out_dir = Path(save_dir) if save_dir else Path(args.log_dir) / "eval_trajectories" / f"step_{step}"
     out_dir.mkdir(parents=True, exist_ok=True)
     safe_filter = getattr(env, "safe_filter", None)
+    goal_threshold = args.eval_goal_threshold if args.eval_goal_threshold is not None else getattr(env, "goal_threshold", 0.30)
     for ep in range(args.eval_traj_episodes):
         reset_seed = eval_scene_seed if args.fixed_scene else (args.seed + 2000 + step + ep)
         obs, _ = env.reset(seed=reset_seed)
@@ -176,6 +196,8 @@ def rollout_eval_trajectories(agent, args, env, save_dir, step, eval_scene_seed=
         fars = []
         aprs = []
         info = {}
+        hit_step = None
+        stopped_on_goal = 0.0
         while not done and l < 1000:
             raw = np.asarray(agent.get_action(jax.random.PRNGKey(args.seed + step * 10000 + ep * 1000 + l), obs[None])[0])
             obs, reward, term, trunc, info = env.step(raw)
@@ -186,6 +208,17 @@ def rollout_eval_trajectories(agent, args, env, save_dir, step, eval_scene_seed=
             l += 1
             ret += float(reward)
             costs.append(safe_info_float(info, "cost", 0.0)); fars.append(safe_info_float(info, "filter_active", 0.0)); aprs.append(safe_info_float(info, "projection_residual", 0.0))
+            goal_dist = safe_info_float(info, "goal_dist", np.nan)
+            goal_met = safe_info_float(info, "goal_met", 0.0)
+            goal_reached = safe_info_float(info, "goal_reached_by_dist", 0.0)
+            goal_hit = (goal_met > 0.0) or (goal_reached > 0.0) or (np.isfinite(goal_dist) and goal_dist < goal_threshold)
+            if hit_step is None and goal_hit:
+                hit_step = l
+            if args.eval_stop_on_goal and goal_hit:
+                done = True
+                stopped_on_goal = 1.0
+                info["eval_stopped_on_goal"] = 1.0
+                break
         goal_met_final = safe_info_float(info, "goal_met", 0.0)
         goal_reached_final = safe_info_float(info, "goal_reached_by_dist", 0.0)
         goal_dist_steps = [r["goal_dist"] for r in records]
@@ -195,11 +228,13 @@ def rollout_eval_trajectories(agent, args, env, save_dir, step, eval_scene_seed=
         goal_dist_final = safe_info_float(info, "goal_dist", np.nan)
         goal_met_any = float(np.max(goal_met_steps)) if goal_met_steps else 0.0
         goal_reached_any = float(np.max(goal_reached_steps)) if goal_reached_steps else 0.0
+        if hit_step is None:
+            hit_step = l
         succ = max(safe_info_float(info, "is_success", 0.0), goal_met_any, goal_reached_any)
-        summary = dict(return_=ret, cost_return=float(np.sum(costs)), FAR=float(np.mean(fars)) if fars else 0.0, APR=float(np.mean(aprs)) if aprs else 0.0, success=succ, success_any=succ, min_goal_dist=goal_dist_min, final_goal_dist=goal_dist_final, goal_met_final=goal_met_final, goal_reached_by_dist_final=goal_reached_final, goal_met_any=goal_met_any, goal_reached_by_dist_any=goal_reached_any)
+        summary = dict(return_=ret, cost_return=float(np.sum(costs)), FAR=float(np.mean(fars)) if fars else 0.0, APR=float(np.mean(aprs)) if aprs else 0.0, success=succ, success_any=succ, min_goal_dist=goal_dist_min, final_goal_dist=goal_dist_final, goal_met_final=goal_met_final, goal_reached_by_dist_final=goal_reached_final, goal_met_any=goal_met_any, goal_reached_by_dist_any=goal_reached_any, hit_step=float(hit_step), stopped_on_goal=stopped_on_goal)
         prefix = out_dir / f"ep{ep:03d}"
         save_records(records, prefix)
-        title = f"{args.env_id} ep={ep} return={summary['return_']:.2f} cost={summary['cost_return']:.2f} FAR={summary['FAR']:.3f} APR={summary['APR']:.3f} min_goal_dist={summary['min_goal_dist']:.3f} final_goal_dist={summary['final_goal_dist']:.3f} success_any={summary['success_any']:.2f} goal_met_final={summary['goal_met_final']:.2f} success={summary['success']:.2f}"
+        title = f"{args.env_id} ep={ep} return={summary['return_']:.2f} cost={summary['cost_return']:.2f} FAR={summary['FAR']:.3f} APR={summary['APR']:.3f} min_goal_dist={summary['min_goal_dist']:.3f} final_goal_dist={summary['final_goal_dist']:.3f} hit_step={summary['hit_step']:.0f} stopped_on_goal={summary['stopped_on_goal']:.0f} success_any={summary['success_any']:.2f} filter_mode={args.eval_filter_mode}"
         plot_safetygym_eval_trajectory(records, scene, save_path=str(prefix) + "_trajectory.png", title=title, arrow_stride=args.eval_traj_stride)
         plot_safetygym_eval_diagnostics(records, save_path=str(prefix) + "_diagnostics.png", title=title)
     return out_dir
@@ -220,6 +255,10 @@ if __name__=='__main__':
     p.add_argument('--eval_traj_episodes', type=int, default=1)
     p.add_argument('--eval_traj_stride', type=int, default=25)
     p.add_argument('--eval_traj_dir', type=str, default=None)
+    p.add_argument('--eval_filter_mode', type=str, default='same', choices=['same', 'on', 'off', 'both'])
+    p.add_argument('--eval_stop_on_goal', action='store_true')
+    p.add_argument('--eval_goal_threshold', type=float, default=None)
+    p.add_argument('--train_terminate_on_goal', action='store_true')
     args=p.parse_args(); np.random.seed(args.seed)
     scene_seed = args.seed
     eval_scene_seed = args.seed
@@ -232,7 +271,16 @@ if __name__=='__main__':
         args.save_curve_interval = 0
     log=Path(args.log_dir); (log/'checkpoints').mkdir(parents=True,exist_ok=True); writer=SummaryWriter(str(log/'tb')); (log/'args.json').write_text(json.dumps(vars(args),indent=2,sort_keys=True))
     env=SafeSafetyGymWrapper(env_id=args.env_id,use_filter=args.use_filter,filter_type=args.filter_type,terminate_on_safety_violation=args.terminate_on_safety_violation,cost_limit_per_step=args.cost_limit_per_step)
-    eenv=SafeSafetyGymWrapper(env_id=args.env_id,use_filter=args.use_filter,filter_type=args.filter_type,terminate_on_safety_violation=args.terminate_on_safety_violation,cost_limit_per_step=args.cost_limit_per_step)
+    eval_envs = {}
+    if args.eval_filter_mode == 'same':
+        eval_envs['eval'] = SafeSafetyGymWrapper(env_id=args.env_id,use_filter=args.use_filter,filter_type=args.filter_type,terminate_on_safety_violation=args.terminate_on_safety_violation,cost_limit_per_step=args.cost_limit_per_step)
+    elif args.eval_filter_mode == 'on':
+        eval_envs['filtered'] = SafeSafetyGymWrapper(env_id=args.env_id,use_filter=True,filter_type=args.filter_type,terminate_on_safety_violation=args.terminate_on_safety_violation,cost_limit_per_step=args.cost_limit_per_step)
+    elif args.eval_filter_mode == 'off':
+        eval_envs['raw'] = SafeSafetyGymWrapper(env_id=args.env_id,use_filter=False,filter_type='none',terminate_on_safety_violation=args.terminate_on_safety_violation,cost_limit_per_step=args.cost_limit_per_step)
+    else:
+        eval_envs['filtered'] = SafeSafetyGymWrapper(env_id=args.env_id,use_filter=True,filter_type=args.filter_type,terminate_on_safety_violation=args.terminate_on_safety_violation,cost_limit_per_step=args.cost_limit_per_step)
+        eval_envs['raw'] = SafeSafetyGymWrapper(env_id=args.env_id,use_filter=False,filter_type='none',terminate_on_safety_violation=args.terminate_on_safety_violation,cost_limit_per_step=args.cost_limit_per_step)
     obs,_=env.reset(seed=scene_seed if args.fixed_scene else args.seed); agent=make_algo(args,env.observation_space.shape[0],env.action_space.shape[0]); key=jax.random.PRNGKey(args.seed+7); buf=[]; train=[]; ev=[]; step_metrics=[]; best={'return_':(-1e18,'best_return_checkpoint.pkl',max),'cost_return':(1e18,'best_cost_checkpoint.pkl',min),'success_rate':(-1e18,'best_success_checkpoint.pkl',max),'safety_score':(1e18,'best_safety_checkpoint.pkl',min)}
     start=time.perf_counter(); pbar=tqdm(range(1,args.total_steps+1))
     try:
@@ -243,6 +291,11 @@ if __name__=='__main__':
                 key,ak=jax.random.split(key)
                 raw=np.asarray(agent.get_action(ak,obs[None])[0])
             next_obs,reward,term,trunc,info=env.step(raw)
+            if args.train_terminate_on_goal:
+                train_goal_threshold = args.eval_goal_threshold if args.eval_goal_threshold is not None else getattr(env, "goal_threshold", 0.30)
+                gd = safe_info_float(info, "goal_dist", np.nan)
+                if safe_info_float(info, "goal_met", 0.0) > 0.0 or safe_info_float(info, "goal_reached_by_dist", 0.0) > 0.0 or (np.isfinite(gd) and gd < train_goal_threshold):
+                    term = True
             exp=SafePullbackExperience.create(obs,raw,info['exec_action'],reward,term,trunc,next_obs,info)
             buf.append(exp)
             buf=buf[-1_000_000:]
@@ -291,11 +344,35 @@ if __name__=='__main__':
             if step>=args.update_after and len(buf)>=args.batch_size:
                 out=agent.update(jax.random.PRNGKey(args.seed+step),sample_batch(buf,args.batch_size)); out['step']=step; train.append(out)
             if step%args.eval_interval==0:
-                m=eval_agent(agent,args,eenv,eval_scene_seed=eval_scene_seed); m['step']=step; ev.append(m)
+                eval_results = {}
+                for eval_name, eval_env in eval_envs.items():
+                    eval_results[eval_name] = eval_agent(agent,args,eval_env,eval_scene_seed=eval_scene_seed)
+                m = {"step": step}
+                if 'filtered' in eval_results:
+                    for key, value in eval_results['filtered'].items():
+                        m[f"filtered_{key}"] = value
+                    m["return_"] = eval_results['filtered'].get("return_", np.nan)
+                    m["success_rate"] = eval_results['filtered'].get("success_rate", np.nan)
+                    m["cost_return"] = eval_results['filtered'].get("cost_return", np.nan)
+                    m["FAR"] = eval_results['filtered'].get("FAR", np.nan)
+                    m["APR"] = eval_results['filtered'].get("APR", np.nan)
+                    m["safety_violation_rate"] = eval_results['filtered'].get("safety_violation_rate", np.nan)
+                if 'raw' in eval_results:
+                    for key, value in eval_results['raw'].items():
+                        m[f"raw_{key}"] = value
+                if 'eval' in eval_results:
+                    m.update(eval_results['eval'])
+                if 'filtered' not in eval_results and 'eval' not in eval_results and 'raw' in eval_results:
+                    m["return_"] = eval_results['raw'].get("return_", np.nan)
+                    m["success_rate"] = eval_results['raw'].get("success_rate", np.nan)
+                    m["cost_return"] = eval_results['raw'].get("cost_return", np.nan)
+                m["safety_score"] = m.get("cost_return", np.nan) + 10.0 * m.get("safety_violation_rate", 0.0) + m.get("FAR", 0.0) + 0.1 * m.get("APR", 0.0)
+                ev.append(m)
                 if args.save_eval_trajectories:
                     try:
-                        traj_dir = rollout_eval_trajectories(agent, args, eenv, args.eval_traj_dir, step, eval_scene_seed=eval_scene_seed)
-                        print(f"[eval traj] saved to {traj_dir}")
+                        for eval_name, eval_env in eval_envs.items():
+                            traj_dir = rollout_eval_trajectories(agent, args, eval_env, Path(args.eval_traj_dir) / eval_name if args.eval_traj_dir else None, step, eval_scene_seed=eval_scene_seed)
+                            print(f"[eval traj][{eval_name}] saved to {traj_dir}")
                     except Exception as e:
                         print(f"[eval traj][warning] failed at step {step}: {e}")
                 with open(log/'checkpoints'/f'checkpoint_step_{step}.pkl','wb') as f: pickle.dump(agent.state,f)
