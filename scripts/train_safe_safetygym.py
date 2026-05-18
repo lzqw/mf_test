@@ -32,7 +32,7 @@ def sample_batch(buf,b):
 def make_algo(args, obs_dim, act_dim):
     key=jax.random.PRNGKey(args.seed)
     net, params = create_safe_pullback_rf2_sac_ent_net(key, obs_dim, act_dim, hidden_sizes=[256]*3, diffusion_hidden_sizes=[256]*3, num_timesteps=args.diffusion_steps, num_ent_timesteps=args.num_ent_timesteps, alpha_value=args.alpha_value, fixed_alpha=args.fixed_alpha, init_alpha=args.init_alpha, noise_scale=args.policy_noise_scale, use_directional_noise=args.use_directional_noise)
-    return SafePullbackRF2SACENTSafetyGym(net, params, gamma=args.gamma, gamma_p=args.gamma_p, lr=args.lr, alpha_lr=args.alpha_lr, sample_k=args.sample_k, lambda_p=args.lambda_p, use_projection_critic=args.use_projection_critic, fixed_alpha=args.fixed_alpha, alpha_value=args.alpha_value, lambda_p_warmup_steps=args.lambda_p_warmup_steps, use_tn_energy=args.use_tn_energy, entropy_reg_mode=args.entropy_reg_mode, use_filter_surrogate=args.use_filter_surrogate, surrogate_warmup_steps=args.surrogate_warmup_steps, surrogate_loss_coef=args.surrogate_loss_coef, lambda_raw_norm=args.lambda_raw_norm)
+    return SafePullbackRF2SACENTSafetyGym(net, params, gamma=args.gamma, gamma_p=args.gamma_p, lr=args.lr, alpha_lr=args.alpha_lr, sample_k=args.sample_k, lambda_p=args.lambda_p, use_projection_critic=args.use_projection_critic, fixed_alpha=args.fixed_alpha, alpha_value=args.alpha_value, lambda_p_warmup_steps=args.lambda_p_warmup_steps, use_tn_energy=args.use_tn_energy, entropy_reg_mode=args.entropy_reg_mode, use_filter_surrogate=args.use_filter_surrogate, surrogate_warmup_steps=args.surrogate_warmup_steps, surrogate_loss_coef=args.surrogate_loss_coef, lambda_raw_norm=args.lambda_raw_norm, include_exec_candidate=args.include_exec_candidate, num_exec_local_candidates=args.num_exec_local_candidates, exec_candidate_noise_scale=args.exec_candidate_noise_scale, exec_bc_coef=args.exec_bc_coef, self_exec_coef=args.self_exec_coef, safe_actor_scale_mode=args.safe_actor_scale_mode, actor_safe_coef=args.actor_safe_coef)
 
 def safe_nanmean(xs):
     arr=np.asarray(xs,dtype=np.float32)
@@ -148,7 +148,7 @@ def eval_agent(agent, args, env, eval_scene_seed=None):
     ms=[]
     for ep in range(args.eval_episodes):
         reset_seed = eval_scene_seed if args.fixed_scene else (args.seed + 1000 + ep)
-        obs,_=env.reset(seed=reset_seed); done=False; ret=0; l=0; costs=[]; fars=[]; aprs=[]; rns=[]; ens=[]; mins=[]; cbfs=[]; sv=[]; cv=[]; sc_ratio=[]; emergency=[]; gh=[]; fh=[]; lh=[]; rh=[]; goal_dists=[]; goal_met_steps=[]; goal_reached_steps=[]; info={}; stopped_on_goal=0.0; hit_step=None
+        obs,_=env.reset(seed=reset_seed); done=False; ret=0; l=0; costs=[]; fars=[]; aprs=[]; rns=[]; ens=[]; mins=[]; cbfs=[]; sv=[]; cv=[]; sc_ratio=[]; emergency=[]; gh=[]; fh=[]; lh=[]; rh=[]; goal_dists=[]; shadow_fars=[]; shadow_aprs=[]; shadow_proj_cost=[]; shadow_sc_ratio=[]; goal_met_steps=[]; goal_reached_steps=[]; info={}; stopped_on_goal=0.0; hit_step=None
         while not done and l<1000:
             a=np.asarray(agent.get_action(jax.random.PRNGKey(args.seed+ep*10000+l),obs[None])[0]); obs,r,t,tr,info=env.step(a); done=t or tr; ret+=float(r); l+=1
             goal_dist = safe_info_float(info, 'goal_dist', np.nan)
@@ -157,7 +157,7 @@ def eval_agent(agent, args, env, eval_scene_seed=None):
             goal_hit = (goal_met > 0.0) or (goal_reached > 0.0) or (np.isfinite(goal_dist) and goal_dist < goal_threshold)
             if hit_step is None and goal_hit:
                 hit_step = l
-            costs.append(safe_info_float(info, 'cost', 0)); fars.append(safe_info_float(info, 'filter_active', 0)); aprs.append(safe_info_float(info, 'projection_residual', 0)); rns.append(safe_info_float(info, 'raw_action_norm', 0)); ens.append(safe_info_float(info, 'exec_action_norm', 0)); mins.append(safe_info_float(info, 'min_h', np.nan)); cbfs.append(safe_info_float(info, 'cbf_violation', 0)); sv.append(safe_info_float(info, 'safety_violation', 0)); cv.append(safe_info_float(info, 'constraint_violation', 0)); sc_ratio.append(safe_info_float(info, 'safe_candidate_ratio', 0.0)); emergency.append(safe_info_float(info, 'emergency_active', 0.0)); gh.append(safe_info_float(info, 'global_min_h', np.nan)); fh.append(safe_info_float(info, 'front_h', np.nan)); lh.append(safe_info_float(info, 'left_h', np.nan)); rh.append(safe_info_float(info, 'right_h', np.nan)); goal_dists.append(goal_dist); goal_met_steps.append(goal_met); goal_reached_steps.append(goal_reached)
+            costs.append(safe_info_float(info, 'cost', 0)); fars.append(safe_info_float(info, 'filter_active', 0)); aprs.append(safe_info_float(info, 'projection_residual', 0)); rns.append(safe_info_float(info, 'raw_action_norm', 0)); ens.append(safe_info_float(info, 'exec_action_norm', 0)); mins.append(safe_info_float(info, 'min_h', np.nan)); cbfs.append(safe_info_float(info, 'cbf_violation', 0)); sv.append(safe_info_float(info, 'safety_violation', 0)); cv.append(safe_info_float(info, 'constraint_violation', 0)); sc_ratio.append(safe_info_float(info, 'safe_candidate_ratio', 0.0)); emergency.append(safe_info_float(info, 'emergency_active', 0.0)); shadow_fars.append(safe_info_float(info, 'shadow_filter_active', np.nan)); shadow_aprs.append(safe_info_float(info, 'shadow_projection_residual', np.nan)); shadow_proj_cost.append(safe_info_float(info, 'shadow_projection_cost', np.nan)); shadow_sc_ratio.append(safe_info_float(info, 'shadow_safe_candidate_ratio', np.nan)); gh.append(safe_info_float(info, 'global_min_h', np.nan)); fh.append(safe_info_float(info, 'front_h', np.nan)); lh.append(safe_info_float(info, 'left_h', np.nan)); rh.append(safe_info_float(info, 'right_h', np.nan)); goal_dists.append(goal_dist); goal_met_steps.append(goal_met); goal_reached_steps.append(goal_reached)
             if args.eval_stop_on_goal and goal_hit:
                 done = True
                 stopped_on_goal = 1.0
@@ -170,7 +170,7 @@ def eval_agent(agent, args, env, eval_scene_seed=None):
         success=max(safe_info_float(info, 'is_success', 0.0), goal_met_any, goal_reached_by_dist_any)
         if hit_step is None:
             hit_step = l
-        ms.append(dict(return_=ret, episode_length=l, success_rate=success, cost_return=float(np.sum(costs)), cost_rate=float(np.mean(np.array(costs)>0)) if costs else 0.0, safety_violation_rate=float(np.mean(sv)) if sv else 0.0, constraint_violation_rate=float(np.mean(cv)) if cv else 0.0, FAR=float(np.mean(fars)) if fars else 0.0, APR=float(np.mean(aprs)) if aprs else 0.0, projection_cost=float(np.mean(np.square(aprs))) if aprs else 0.0, raw_action_norm=float(np.mean(rns)) if rns else 0.0, exec_action_norm=float(np.mean(ens)) if ens else 0.0, min_h=safe_nanmean(mins) if mins else np.nan, cbf_violation_rate=float(np.mean(cbfs)) if cbfs else 0.0, safe_candidate_ratio=float(np.mean(sc_ratio)) if sc_ratio else 0.0, emergency_rate=float(np.mean(emergency)) if emergency else 0.0, global_min_h=safe_nanmean(gh) if gh else np.nan, front_h=safe_nanmean(fh) if fh else np.nan, left_h=safe_nanmean(lh) if lh else np.nan, right_h=safe_nanmean(rh) if rh else np.nan, goal_dist_min=float(np.nanmin(np.asarray(goal_dists, dtype=np.float32))) if goal_dists else np.nan, goal_dist_mean=safe_nanmean(goal_dists), goal_dist_final=safe_info_float(info, 'goal_dist', np.nan), goal_met_any=goal_met_any, goal_reached_by_dist_any=goal_reached_by_dist_any, goal_met_final=goal_met_final, goal_reached_by_dist_final=goal_reached_final, goal_met_rate=goal_met_final, goal_reached_by_dist_rate=goal_reached_final, goal_met_any_rate=goal_met_any, goal_reached_by_dist_any_rate=goal_reached_by_dist_any, eval_stopped_on_goal=stopped_on_goal, hit_step=float(hit_step)))
+        ms.append(dict(return_=ret, episode_length=l, success_rate=success, cost_return=float(np.sum(costs)), cost_rate=float(np.mean(np.array(costs)>0)) if costs else 0.0, safety_violation_rate=float(np.mean(sv)) if sv else 0.0, constraint_violation_rate=float(np.mean(cv)) if cv else 0.0, FAR=float(np.mean(fars)) if fars else 0.0, APR=float(np.mean(aprs)) if aprs else 0.0, projection_cost=float(np.mean(np.square(aprs))) if aprs else 0.0, raw_action_norm=float(np.mean(rns)) if rns else 0.0, exec_action_norm=float(np.mean(ens)) if ens else 0.0, min_h=safe_nanmean(mins) if mins else np.nan, cbf_violation_rate=float(np.mean(cbfs)) if cbfs else 0.0, safe_candidate_ratio=float(np.mean(sc_ratio)) if sc_ratio else 0.0, emergency_rate=float(np.mean(emergency)) if emergency else 0.0, raw_shadow_FAR=safe_nanmean(shadow_fars), raw_shadow_APR=safe_nanmean(shadow_aprs), raw_shadow_projection_cost=safe_nanmean(shadow_proj_cost), raw_shadow_safe_candidate_ratio=safe_nanmean(shadow_sc_ratio), global_min_h=safe_nanmean(gh) if gh else np.nan, front_h=safe_nanmean(fh) if fh else np.nan, left_h=safe_nanmean(lh) if lh else np.nan, right_h=safe_nanmean(rh) if rh else np.nan, goal_dist_min=float(np.nanmin(np.asarray(goal_dists, dtype=np.float32))) if goal_dists else np.nan, goal_dist_mean=safe_nanmean(goal_dists), goal_dist_final=safe_info_float(info, 'goal_dist', np.nan), goal_met_any=goal_met_any, goal_reached_by_dist_any=goal_reached_by_dist_any, goal_met_final=goal_met_final, goal_reached_by_dist_final=goal_reached_final, goal_met_rate=goal_met_final, goal_reached_by_dist_rate=goal_reached_final, goal_met_any_rate=goal_met_any, goal_reached_by_dist_any_rate=goal_reached_by_dist_any, eval_stopped_on_goal=stopped_on_goal, hit_step=float(hit_step)))
     out={k:safe_nanmean([m[k] for m in ms]) for k in ms[0].keys()}
     out['eval_stopped_on_goal_rate'] = out.get('eval_stopped_on_goal', 0.0)
     out['hit_step_mean'] = out.get('hit_step', np.nan)
@@ -247,6 +247,14 @@ if __name__=='__main__':
     p.add_argument('--curve_dir',type=str,default=None)
     p.add_argument('--save_partial_on_eval',action='store_true',default=True)
     p.add_argument('--plot_train_window',type=int,default=100)
+    p.add_argument('--include_exec_candidate', action='store_true', default=True)
+    p.add_argument('--no_include_exec_candidate', action='store_false', dest='include_exec_candidate')
+    p.add_argument('--num_exec_local_candidates', type=int, default=8)
+    p.add_argument('--exec_candidate_noise_scale', type=float, default=0.03)
+    p.add_argument('--exec_bc_coef', type=float, default=0.0)
+    p.add_argument('--self_exec_coef', type=float, default=0.0)
+    p.add_argument('--safe_actor_scale_mode', type=str, default='alpha', choices=['alpha', 'direct'])
+    p.add_argument('--actor_safe_coef', type=float, default=1.0)
     p.add_argument('--use_tn_energy',action='store_true'); p.add_argument('--use_projection_critic',action='store_true'); p.add_argument('--lambda_p',type=float,default=0.03); p.add_argument('--lambda_p_warmup_steps',type=int,default=0); p.add_argument('--entropy_reg_mode',default='flac_tn'); p.add_argument('--sample_k',type=int,default=256); p.add_argument('--diffusion_steps',type=int,default=10); p.add_argument('--num_ent_timesteps',type=int,default=10); p.add_argument('--policy_noise_scale',type=float,default=0.3); p.add_argument('--use_directional_noise',action='store_true'); p.add_argument('--fixed_alpha',action='store_true'); p.add_argument('--alpha_value',type=float,default=0.1); p.add_argument('--init_alpha',type=float,default=0.1); p.add_argument('--lr',type=float,default=3e-4); p.add_argument('--alpha_lr',type=float,default=1e-2); p.add_argument('--gamma',type=float,default=0.99); p.add_argument('--gamma_p',type=float,default=0.99); p.add_argument('--use_filter_surrogate',action='store_true'); p.add_argument('--surrogate_warmup_steps',type=int,default=0); p.add_argument('--surrogate_loss_coef',type=float,default=1.0); p.add_argument('--lambda_raw_norm',type=float,default=0.0)
     p.add_argument('--fixed_scene', action='store_true')
     p.add_argument('--scene_seed', type=int, default=None)
@@ -259,6 +267,7 @@ if __name__=='__main__':
     p.add_argument('--eval_stop_on_goal', action='store_true')
     p.add_argument('--eval_goal_threshold', type=float, default=None)
     p.add_argument('--train_terminate_on_goal', action='store_true')
+    p.add_argument('--goal_terminate_threshold', type=float, default=None)
     args=p.parse_args(); np.random.seed(args.seed)
     scene_seed = args.seed
     eval_scene_seed = args.seed
@@ -277,10 +286,10 @@ if __name__=='__main__':
     elif args.eval_filter_mode == 'on':
         eval_envs['filtered'] = SafeSafetyGymWrapper(env_id=args.env_id,use_filter=True,filter_type=args.filter_type,terminate_on_safety_violation=args.terminate_on_safety_violation,cost_limit_per_step=args.cost_limit_per_step)
     elif args.eval_filter_mode == 'off':
-        eval_envs['raw'] = SafeSafetyGymWrapper(env_id=args.env_id,use_filter=False,filter_type='none',terminate_on_safety_violation=args.terminate_on_safety_violation,cost_limit_per_step=args.cost_limit_per_step)
+        eval_envs['raw'] = SafeSafetyGymWrapper(env_id=args.env_id,use_filter=False,filter_type='none',shadow_filter=True,terminate_on_safety_violation=args.terminate_on_safety_violation,cost_limit_per_step=args.cost_limit_per_step)
     else:
         eval_envs['filtered'] = SafeSafetyGymWrapper(env_id=args.env_id,use_filter=True,filter_type=args.filter_type,terminate_on_safety_violation=args.terminate_on_safety_violation,cost_limit_per_step=args.cost_limit_per_step)
-        eval_envs['raw'] = SafeSafetyGymWrapper(env_id=args.env_id,use_filter=False,filter_type='none',terminate_on_safety_violation=args.terminate_on_safety_violation,cost_limit_per_step=args.cost_limit_per_step)
+        eval_envs['raw'] = SafeSafetyGymWrapper(env_id=args.env_id,use_filter=False,filter_type='none',shadow_filter=True,terminate_on_safety_violation=args.terminate_on_safety_violation,cost_limit_per_step=args.cost_limit_per_step)
     obs,_=env.reset(seed=scene_seed if args.fixed_scene else args.seed); agent=make_algo(args,env.observation_space.shape[0],env.action_space.shape[0]); key=jax.random.PRNGKey(args.seed+7); buf=[]; train=[]; ev=[]; step_metrics=[]; best={'return_':(-1e18,'best_return_checkpoint.pkl',max),'cost_return':(1e18,'best_cost_checkpoint.pkl',min),'success_rate':(-1e18,'best_success_checkpoint.pkl',max),'safety_score':(1e18,'best_safety_checkpoint.pkl',min)}
     start=time.perf_counter(); pbar=tqdm(range(1,args.total_steps+1))
     try:
@@ -292,10 +301,14 @@ if __name__=='__main__':
                 raw=np.asarray(agent.get_action(ak,obs[None])[0])
             next_obs,reward,term,trunc,info=env.step(raw)
             if args.train_terminate_on_goal:
-                train_goal_threshold = args.eval_goal_threshold if args.eval_goal_threshold is not None else getattr(env, "goal_threshold", 0.30)
+                threshold = args.goal_terminate_threshold
                 gd = safe_info_float(info, "goal_dist", np.nan)
-                if safe_info_float(info, "goal_met", 0.0) > 0.0 or safe_info_float(info, "goal_reached_by_dist", 0.0) > 0.0 or (np.isfinite(gd) and gd < train_goal_threshold):
+                goal_hit = safe_info_float(info, "goal_met", 0.0) > 0.0 or safe_info_float(info, "goal_reached_by_dist", 0.0) > 0.0
+                if threshold is not None and np.isfinite(gd) and gd < float(threshold):
+                    goal_hit = True
+                if goal_hit:
                     term = True
+                    info["train_terminated_on_goal"] = 1.0
             exp=SafePullbackExperience.create(obs,raw,info['exec_action'],reward,term,trunc,next_obs,info)
             buf.append(exp)
             buf=buf[-1_000_000:]
