@@ -37,7 +37,7 @@ class SafePullbackRF2SACENTSafetyGym(Algorithm):
                  beta_normal_entropy=1.0, min_effective_entropy=-20.0, target_effective_entropy=1.0,
                  normal_energy_coef=0.05, target_safe_energy=0.05,
                  safe_iso_coef=0.05, safe_energy_variant="normal_iso", weight_mix=0.05,
-                 use_filter_surrogate=False, surrogate_warmup_steps=0, surrogate_loss_coef=1.0, lambda_raw_norm=0.0):
+                 use_filter_surrogate=False, surrogate_warmup_steps=0, surrogate_loss_coef=1.0, lambda_raw_norm=0.0, include_exec_candidate=True, num_exec_local_candidates=8, exec_candidate_noise_scale=0.03, exec_bc_coef=0.0, self_exec_coef=0.0, safe_actor_scale_mode="alpha", actor_safe_coef=1.0):
         self.agent = agent
         self.gamma = gamma
         self.gamma_p = gamma_p
@@ -76,6 +76,13 @@ class SafePullbackRF2SACENTSafetyGym(Algorithm):
         self.surrogate_warmup_steps = surrogate_warmup_steps
         self.surrogate_loss_coef = surrogate_loss_coef
         self.lambda_raw_norm = lambda_raw_norm
+        self.include_exec_candidate = include_exec_candidate
+        self.num_exec_local_candidates = num_exec_local_candidates
+        self.exec_candidate_noise_scale = exec_candidate_noise_scale
+        self.exec_bc_coef = exec_bc_coef
+        self.self_exec_coef = self_exec_coef
+        self.safe_actor_scale_mode = safe_actor_scale_mode
+        self.actor_safe_coef = actor_safe_coef
         self.optim = optax.adam(lr)
         self.policy_optim = optax.adam(lr)
         self.alpha_optim = optax.adam(alpha_lr)
@@ -257,19 +264,33 @@ class SafePullbackRF2SACENTSafetyGym(Algorithm):
             min_k = 8
             k_eff = jnp.maximum(K, min_k)
 
-            n_local = int(max(self.K // 2, 1))
-            n_fixed = 1
-            n_uniform = int(max(self.K - n_fixed - n_local, 0))
-            n_local = int(self.K - n_fixed - n_uniform)
+            exec_action = jnp.clip(exec_action, -1.0, 1.0)
+            n_fixed = 1 + (1 if self.include_exec_candidate else 0)
+            n_exec_local = int(min(max(self.num_exec_local_candidates, 0), max(self.K - n_fixed, 0))) if self.include_exec_candidate else 0
+            remaining = max(self.K - n_fixed - n_exec_local, 0)
+            n_raw_local = int(max(remaining // 2, 0))
+            n_uniform = int(max(self.K - n_fixed - n_exec_local - n_raw_local, 0))
 
-            local_obs = jnp.repeat(obs[:, None, :], n_local, axis=1)
-            local_raw = jnp.repeat(raw_action[:, None, :], n_local, axis=1)
-            scale = alpha * self.agent.noise_scale
-            local_noise = self.agent.directional_noise(k_local, local_obs, scale)
-            local_clean = jnp.clip(local_raw + local_noise, -1.0, 1.0)
+            scale_raw = alpha * self.agent.noise_scale
+            scale_exec = jnp.float32(self.exec_candidate_noise_scale)
+            raw_local_obs = jnp.repeat(obs[:, None, :], n_raw_local, axis=1)
+            raw_local = jnp.repeat(raw_action[:, None, :], n_raw_local, axis=1)
+            raw_local_noise = self.agent.directional_noise(k_local, raw_local_obs, scale_raw) if n_raw_local > 0 else jnp.zeros((batch_size, 0, act_dim), dtype=obs.dtype)
+            raw_local_clean = jnp.clip(raw_local + raw_local_noise, -1.0, 1.0)
+
+            exec_local_obs = jnp.repeat(obs[:, None, :], n_exec_local, axis=1)
+            exec_local = jnp.repeat(exec_action[:, None, :], n_exec_local, axis=1)
+            exec_local_noise = self.agent.directional_noise(k_local, exec_local_obs, scale_exec) if n_exec_local > 0 else jnp.zeros((batch_size, 0, act_dim), dtype=obs.dtype)
+            exec_local_clean = jnp.clip(exec_local + exec_local_noise, -1.0, 1.0)
 
             uniform_clean = jax.random.uniform(k_rand, (batch_size, n_uniform, act_dim), minval=-1.0, maxval=1.0)
-            clean = jnp.concatenate([raw_action[:, None, :], local_clean, uniform_clean], axis=1)
+            clean_parts = [raw_action[:, None, :]]
+            if self.include_exec_candidate:
+                clean_parts.append(exec_action[:, None, :])
+                clean_parts.append(exec_local_clean)
+            clean_parts.append(raw_local_clean)
+            clean_parts.append(uniform_clean)
+            clean = jnp.concatenate(clean_parts, axis=1)
             clean = clean[:, :self.K, :]
 
             t = jax.random.uniform(k_t, (batch_size, self.K, 1), minval=1e-3, maxval=0.994)
@@ -325,12 +346,35 @@ class SafePullbackRF2SACENTSafetyGym(Algorithm):
                         e_n, e_t, e_iso, gate, residual_xt = compute_surrogate_filter_energy(obs_r, noisy_r, v_pred)
                         actor_safe_surrogate = jnp.mean(e_n + e_t) if self.safe_energy_variant == "normal_tangent" else jnp.mean(e_n + self.safe_iso_coef * e_iso)
                         actor_safe = surrogate_gate * actor_safe_surrogate + (1.0 - surrogate_gate) * qp_penalty
-                        return flow_loss + alpha * self.tn_coef * actor_safe, (flow_loss, actor_safe, jnp.mean(e_n), jnp.mean(e_t), jnp.mean(gate), jnp.mean(residual_xt), actor_safe_surrogate)
-                    return flow_loss + alpha * self.tn_coef * qp_penalty, (flow_loss, qp_penalty, qp_penalty, jnp.float32(0.0), jnp.float32(0.0), jnp.mean(residual), qp_penalty)
-                return flow_loss, (flow_loss, jnp.float32(0.0), qp_penalty, jnp.float32(0.0), jnp.float32(0.0), jnp.mean(residual), qp_penalty)
+                        safe_scale = alpha * self.tn_coef if self.safe_actor_scale_mode == "alpha" else jnp.float32(self.actor_safe_coef)
+                        base_loss = flow_loss + safe_scale * actor_safe
+                        return base_loss, (flow_loss, actor_safe, jnp.mean(e_n), jnp.mean(e_t), jnp.mean(gate), jnp.mean(residual_xt), actor_safe_surrogate)
+                    safe_scale = alpha * self.tn_coef if self.safe_actor_scale_mode == "alpha" else jnp.float32(self.actor_safe_coef)
+                    base_loss = flow_loss + safe_scale * qp_penalty
+                    return base_loss, (flow_loss, qp_penalty, qp_penalty, jnp.float32(0.0), jnp.float32(0.0), jnp.mean(residual), qp_penalty)
+                exec_bc_loss = jnp.float32(0.0)
+                if self.exec_bc_coef > 0.0:
+                    k_bc_t, k_bc_n = jax.random.split(k2)
+                    t_bc = jax.random.uniform(k_bc_t, (obs.shape[0], 1), minval=1e-3, maxval=0.994)
+                    noise_bc = jax.random.normal(k_bc_n, exec_action.shape)
+                    x_t_bc = t_bc * exec_action + (1.0 - t_bc) * noise_bc
+                    u_bc = exec_action - noise_bc
+                    v_bc = self.agent.policy(pp, obs, x_t_bc, t_bc.squeeze(-1))
+                    exec_bc_loss = jnp.mean((v_bc - u_bc) ** 2)
+                self_exec_loss = jnp.float32(0.0)
+                if self.self_exec_coef > 0.0 and self.use_filter_surrogate:
+                    a_pi = self.agent.get_action(k2, (pp, p.log_alpha, p.q1, p.q2), obs)
+                    a_exec_hat = jax.lax.stop_gradient(self.agent.get_exec_action_hat(p.g, obs, a_pi))
+                    self_exec_loss = jnp.mean(jnp.sum((a_pi - a_exec_hat) ** 2, axis=-1))
+                total = flow_loss + self.exec_bc_coef * exec_bc_loss + self.self_exec_coef * self_exec_loss
+                return total, (flow_loss, jnp.float32(0.0), qp_penalty, jnp.float32(0.0), jnp.float32(0.0), jnp.mean(residual), qp_penalty, exec_bc_loss, self_exec_loss)
 
             (policy_loss, p_aux), policy_grads = jax.value_and_grad(ploss, has_aux=True)(p.policy)
-            _, tn_energy, tn_normal_energy, tn_tangent_energy, tn_gate_mean, tn_residual_xt_mean, safe_energy_actor_mean = p_aux
+            extra_exec_bc = jnp.float32(0.0); extra_self_exec = jnp.float32(0.0)
+            if len(p_aux) >= 9:
+                _, tn_energy, tn_normal_energy, tn_tangent_energy, tn_gate_mean, tn_residual_xt_mean, safe_energy_actor_mean, extra_exec_bc, extra_self_exec = p_aux
+            else:
+                _, tn_energy, tn_normal_energy, tn_tangent_energy, tn_gate_mean, tn_residual_xt_mean, safe_energy_actor_mean = p_aux
 
             alpha_loss_val = jnp.float32(0.0)
             if self.fixed_alpha:
@@ -398,6 +442,13 @@ class SafePullbackRF2SACENTSafetyGym(Algorithm):
                         tangent_candidate_fraction=jnp.float32((2.0 + n_local) / self.K),
                         uniform_candidate_fraction=jnp.float32(n_uniform / self.K),
                         goal_candidate_fraction=jnp.float32(1.0 / self.K),
+                        exec_candidate_fraction=jnp.float32((1.0 if self.include_exec_candidate else 0.0) / self.K),
+                        exec_local_candidate_fraction=jnp.float32(n_exec_local / self.K),
+                        num_exec_local_candidates=jnp.float32(n_exec_local),
+                        exec_candidate_noise_scale=jnp.float32(self.exec_candidate_noise_scale),
+                        exec_bc_loss=extra_exec_bc, self_exec_loss=extra_self_exec,
+                        actor_safe_coef=jnp.float32(self.actor_safe_coef),
+                        safe_actor_scale_mode_id=jnp.float32(0.0 if self.safe_actor_scale_mode == "alpha" else 1.0),
                         tn_energy=tn_energy, tn_normal_energy=tn_normal_energy,
                         tn_tangent_energy=tn_tangent_energy, tn_gate_mean=tn_gate_mean,
                         tn_residual_xt_mean=tn_residual_xt_mean,

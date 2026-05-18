@@ -26,13 +26,13 @@ def main():
         tr=load(train_pkl) if train_pkl.exists() else []
         row={'path':str(run_dir), 'num_eval':len(ev)}
         for k in ['return_','cost_return','success_rate','goal_dist_min','goal_dist_final','goal_dist_mean','goal_met_any_rate','goal_reached_by_dist_any_rate','raw_action_norm','APR','FAR',
-                  'raw_return_','raw_success_rate','raw_cost_return','raw_goal_dist_min','raw_goal_dist_final',
+                  'raw_return_','raw_success_rate','raw_cost_return','raw_goal_dist_min','raw_goal_dist_final','raw_shadow_FAR','raw_shadow_APR','raw_shadow_projection_cost',
                   'filtered_return_','filtered_success_rate','filtered_cost_return','filtered_goal_dist_min','filtered_goal_dist_final','filtered_FAR','filtered_APR',
                   'eval_stopped_on_goal_rate','hit_step_mean']:
             a,b=first_last(ev,k); row[f'first_{k}']=a; row[f'last_{k}']=b
         if tr:
             last=tr[-1]
-            for k in ['q1_loss','q2_loss','qp_loss','vp_loss','policy_loss','alpha','g_loss']:
+            for k in ['q1_loss','q2_loss','qp_loss','vp_loss','policy_loss','alpha','g_loss','exec_bc_loss','self_exec_loss','exec_candidate_fraction','exec_local_candidate_fraction']:
                 row[f'train_last_{k}']=last.get(k,np.nan)
         results.append(row)
     txt=Path(args.out)
@@ -41,7 +41,7 @@ def main():
         lines.append(f"path: {r['path']}")
         lines.append(f"  num eval: {r['num_eval']}")
         for k in ['return_','cost_return','success_rate','goal_dist_min','goal_dist_final','goal_dist_mean','goal_met_any_rate','goal_reached_by_dist_any_rate','raw_action_norm','APR','FAR',
-                  'raw_return_','raw_success_rate','raw_cost_return','raw_goal_dist_min','raw_goal_dist_final',
+                  'raw_return_','raw_success_rate','raw_cost_return','raw_goal_dist_min','raw_goal_dist_final','raw_shadow_FAR','raw_shadow_APR','raw_shadow_projection_cost',
                   'filtered_return_','filtered_success_rate','filtered_cost_return','filtered_goal_dist_min','filtered_goal_dist_final','filtered_FAR','filtered_APR',
                   'eval_stopped_on_goal_rate','hit_step_mean']:
             lines.append(f"  {k}: {r.get('first_'+k,np.nan)} -> {r.get('last_'+k,np.nan)}")

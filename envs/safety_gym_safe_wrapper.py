@@ -34,11 +34,13 @@ def _default_filter_info(raw_action: np.ndarray, exec_action: np.ndarray):
 
 class SafeSafetyGymWrapper(gym.Wrapper):
     def __init__(self, env_id="SafetyPointGoal1-v0", use_filter=True, filter_type="hybrid", filter_cfg=None,
-                 render_mode=None, terminate_on_safety_violation=False, cost_limit_per_step=0.0, goal_threshold=None, **env_kwargs):
+                 render_mode=None, terminate_on_safety_violation=False, cost_limit_per_step=0.0,
+                 goal_threshold=None, shadow_filter=False, **env_kwargs):
         env = safety_gymnasium.make(env_id, render_mode=render_mode, **env_kwargs)
         super().__init__(env)
         self.env_id = env_id
         self.use_filter = use_filter
+        self.shadow_filter = shadow_filter
         self.terminate_on_safety_violation = terminate_on_safety_violation
         self.cost_limit_per_step = float(cost_limit_per_step)
         cfg = filter_cfg or SafetyGymFilterConfig()
@@ -58,6 +60,8 @@ class SafeSafetyGymWrapper(gym.Wrapper):
 
     def step(self, raw_action):
         raw_action = np.asarray(raw_action, dtype=np.float32)
+        shadow_exec_action = None
+        shadow_filter_info = None
         if self.use_filter:
             exec_action, filter_info = self.safe_filter.project(
                 raw_action=raw_action, obs=self.last_obs, info=self.last_info,
@@ -67,6 +71,12 @@ class SafeSafetyGymWrapper(gym.Wrapper):
         else:
             exec_action = np.clip(raw_action, self.action_space.low, self.action_space.high)
             filter_info = _default_filter_info(raw_action, exec_action)
+            if self.shadow_filter:
+                shadow_exec_action, shadow_filter_info = self.safe_filter.project(
+                    raw_action=raw_action, obs=self.last_obs, info=self.last_info,
+                    prev_exec_action=self.prev_exec_action, action_space=self.action_space, env_id=self.env_id,
+                    env=self.env,
+                )
 
         out = self.env.step(exec_action)
         if len(out) == 6:
@@ -107,6 +117,17 @@ class SafeSafetyGymWrapper(gym.Wrapper):
         info["is_success"] = max(existing_success, env_goal_met, distance_goal_reached)
 
         info.update(filter_info)
+        if (not self.use_filter) and self.shadow_filter:
+            if shadow_exec_action is None or shadow_filter_info is None:
+                shadow_exec_action = exec_action
+                shadow_filter_info = _default_filter_info(raw_action, shadow_exec_action)
+            info["shadow_exec_action"] = shadow_exec_action
+            info["shadow_projection_residual"] = float(shadow_filter_info.get("projection_residual", 0.0))
+            info["shadow_projection_cost"] = float(shadow_filter_info.get("projection_cost", 0.0))
+            info["shadow_filter_active"] = float(shadow_filter_info.get("filter_active", 0.0))
+            info["shadow_safe_candidate_ratio"] = float(shadow_filter_info.get("safe_candidate_ratio", 0.0))
+            info["shadow_emergency_active"] = float(shadow_filter_info.get("emergency_active", 0.0))
+            info["shadow_min_h"] = float(shadow_filter_info.get("min_h", np.nan))
 
         if self.terminate_on_safety_violation and cost > self.cost_limit_per_step:
             terminated = True
