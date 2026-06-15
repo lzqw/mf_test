@@ -43,7 +43,6 @@ def make_algo_kwargs(args):
         use_projection_critic=args.use_projection_critic,
         fixed_alpha=args.fixed_alpha,
         alpha_value=args.alpha_value,
-        init_alpha=args.init_alpha,
         lambda_p_warmup_steps=args.lambda_p_warmup_steps,
         lambda_d=args.lambda_d,
         use_frpi_score=args.use_frpi_score,
@@ -75,12 +74,20 @@ def make_algo(args, obs_dim=8, act_dim=2):
     from relax.algorithm.safe_pullback_rf2_sac_ent import SafePullbackRF2SACENT
     from relax.network.safe_pullback_rf2_sac_ent import create_safe_pullback_rf2_sac_ent_net
     key = jax.random.PRNGKey(args.seed)
+    hidden_sizes = getattr(args, "hidden_sizes", "256,256,256")
+    hidden_sizes = [int(x) for x in str(hidden_sizes).split(",") if str(x).strip()]
+    if len(hidden_sizes) == 0:
+        hidden_sizes = [256, 256, 256]
+    diffusion_hidden_sizes = getattr(args, "diffusion_hidden_sizes", "256,256,256")
+    diffusion_hidden_sizes = [int(x) for x in str(diffusion_hidden_sizes).split(",") if str(x).strip()]
+    if len(diffusion_hidden_sizes) == 0:
+        diffusion_hidden_sizes = [256, 256, 256]
     net, params = create_safe_pullback_rf2_sac_ent_net(
         key,
         obs_dim,
         act_dim,
-        hidden_sizes=[256, 256, 256],
-        diffusion_hidden_sizes=[256, 256, 256],
+        hidden_sizes=hidden_sizes,
+        diffusion_hidden_sizes=diffusion_hidden_sizes,
         num_timesteps=args.diffusion_steps,
         num_ent_timesteps=args.num_ent_timesteps,
         alpha_value=args.alpha_value,
@@ -337,6 +344,8 @@ def load_double_integrator_agent(checkpoint):
         "diffusion_steps": 10,
         "num_ent_timesteps": 10,
         "policy_noise_scale": 0.3,
+        "hidden_sizes": "256,256,256",
+        "diffusion_hidden_sizes": "256,256,256",
     })
     for k, v in saved.items():
         if hasattr(args, k):
@@ -397,6 +406,8 @@ def main():
     p.add_argument("--safe_iso_coef", type=float, default=0.2)
     p.add_argument("--safe_energy_variant", choices=["normal_iso", "normal_tangent"], default="normal_tangent")
     p.add_argument("--weight_mix", type=float, default=0.05)
+    p.add_argument("--hidden_sizes", type=str, default="256,256,256")
+    p.add_argument("--diffusion_hidden_sizes", type=str, default="256,256,256")
     args = p.parse_args()
 
     outdir = Path(args.outdir)

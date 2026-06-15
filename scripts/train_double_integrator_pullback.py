@@ -134,7 +134,10 @@ def main():
     p.add_argument("--alpha_value", type=float, default=0.1)
     p.add_argument("--init_alpha", type=float, default=0.1)
     p.add_argument("--policy_noise_scale", type=float, default=0.3)
+    p.add_argument("--hidden_sizes", type=str, default="256,256,256")
+    p.add_argument("--diffusion_hidden_sizes", type=str, default="256,256,256")
     p.add_argument("--weight_mix", type=float, default=0.05)
+    p.add_argument("--update_every", type=int, default=1)
     p.add_argument("--use_projection_critic", action="store_true", default=False)
     p.add_argument("--fixed_alpha", action="store_true", default=False)
     p.add_argument("--lambda_p_warmup_steps", type=int, default=100000)
@@ -286,6 +289,7 @@ def main():
 
             if (
                 step >= args.update_after
+                and step % args.update_every == 0
                 and len(buffer) >= args.batch_size
             ):
                 key, uk = jax.random.split(key)
