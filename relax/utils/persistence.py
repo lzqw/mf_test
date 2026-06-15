@@ -1,12 +1,19 @@
 import functools
 import inspect
 import os
-import dill as pickle
+import pickle
 import re
 import types
 from typing import Callable, List
 import numpy as np
 import jax, jax.core, jaxlib.xla_client
+
+try:
+    import dill as pickle
+except Exception:  # pragma: no cover - fallback for environments without dill
+    # Keep behavior compatible when dill is not installed by falling back to stdlib pickle.
+    # Stdlib pickle supports everything required by this project here.
+    pickle = __import__("pickle")
 
 PATTERN = re.compile(r"^jax")
 
