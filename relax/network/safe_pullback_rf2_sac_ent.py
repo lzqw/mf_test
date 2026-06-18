@@ -62,6 +62,26 @@ class SafePullbackRF2SACENTNet:
     def get_exec_action_hat(self, g_params, obs, raw_action):
         return self.g(g_params, obs, raw_action)
 
+    def _directional_obs_features(self, obs):
+        if obs.shape[-1] == 10:
+            goal_vec = -obs[..., 2:4]
+            normal_vec = obs[..., 4:6]
+            d_obs = obs[..., 6:7]
+            return goal_vec, normal_vec, d_obs
+        if obs.shape[-1] == 16:
+            goal_vec = obs[..., 2:4]
+            obstacle_block = obs[..., 7:]
+            obstacle_block = obstacle_block.reshape(*obs.shape[:-1], 3, 3)
+            rel = obstacle_block[..., :2]
+            clear = obstacle_block[..., 2]
+            idx = jnp.argmin(clear, axis=-1)
+            normal_vec = jnp.take_along_axis(rel, idx[..., None, None], axis=-2).squeeze(axis=-2)
+            d_obs = jnp.min(clear, axis=-1, keepdims=True)
+            return goal_vec, normal_vec, d_obs
+        goal_vec = obs[..., 2:4]
+        normal_vec = obs[..., 4:6]
+        d_obs = jnp.linalg.norm(normal_vec, axis=-1, keepdims=True)
+        return goal_vec, normal_vec, d_obs
 
     def directional_noise(self, key, obs, base_std, return_components=False):
         if (not self.use_directional_noise) or self.act_dim != 2 or obs.shape[-1] < 8:
@@ -71,9 +91,7 @@ class SafePullbackRF2SACENTNet:
                 return noise, (zero, zero, zero, zero)
             return noise
 
-        goal_vec = -obs[..., 2:4]
-        normal_vec = obs[..., 4:6]
-        d_obs = obs[..., 6:7]
+        goal_vec, normal_vec, d_obs = self._directional_obs_features(obs)
 
         e_goal = goal_vec / (jnp.linalg.norm(goal_vec, axis=-1, keepdims=True) + 1e-6)
         e_normal = normal_vec / (jnp.linalg.norm(normal_vec, axis=-1, keepdims=True) + 1e-6)

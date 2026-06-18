@@ -1,6 +1,28 @@
 from typing import NamedTuple, Tuple
 import jax
 import jax.numpy as jnp
+
+
+def _directional_obs_features(obs):
+    if obs.shape[-1] == 10:
+        goal_vec = -obs[..., 2:4]
+        rel_obs = obs[..., 4:6]
+        d_obs = obs[..., 6:7]
+        return goal_vec, rel_obs, d_obs
+    if obs.shape[-1] == 16:
+        goal_vec = obs[..., 2:4]
+        obstacle_block = obs[..., 7:]
+        obstacle_block = obstacle_block.reshape(*obs.shape[:-1], 3, 3)
+        rel = obstacle_block[..., :2]
+        clear = obstacle_block[..., 2]
+        idx = jnp.argmin(clear, axis=-1)
+        rel_obs = jnp.take_along_axis(rel, idx[..., None, None], axis=-2).squeeze(axis=-2)
+        d_obs = jnp.min(clear, axis=-1, keepdims=True)
+        return goal_vec, rel_obs, d_obs
+    goal_vec = obs[..., 2:4]
+    rel_obs = obs[..., 4:6]
+    d_obs = jnp.linalg.norm(rel_obs, axis=-1, keepdims=True)
+    return goal_vec, rel_obs, d_obs
 import numpy as np
 import optax
 
@@ -246,9 +268,7 @@ class SafePullbackRF2SACENT(Algorithm):
             min_k = 8
             k_eff = jnp.maximum(K, min_k)
 
-            goal_vec = -obs[..., 2:4]
-            rel_obs = obs[..., 4:6]
-            d_obs = obs[..., 6:7]
+            goal_vec, rel_obs, d_obs = _directional_obs_features(obs)
             e_goal = goal_vec / (jnp.linalg.norm(goal_vec, axis=-1, keepdims=True) + 1e-6)
             e_normal = rel_obs / (jnp.linalg.norm(rel_obs, axis=-1, keepdims=True) + 1e-6)
             e_tangent = jnp.concatenate([-e_normal[..., 1:2], e_normal[..., 0:1]], axis=-1)
@@ -284,8 +304,9 @@ class SafePullbackRF2SACENT(Algorithm):
             q_proj = self.agent.get_qp(p.qp, obs_rep, clean) if self.use_projection_critic else jnp.zeros_like(q_reward)
 
             pos = obs_rep[..., 0:2]
-            goal = jnp.asarray([-2.6, 0.0], dtype=jnp.float32)
-            dist_now = jnp.linalg.norm(pos - goal, axis=-1)
+            goal_rel = obs_rep[..., 2:4]
+            goal = pos + goal_rel
+            dist_now = jnp.linalg.norm(goal_rel, axis=-1)
             next_pos = pos + self.cfg.dt * self.cfg.u_max * exec_clean
             dist_next = jnp.linalg.norm(next_pos - goal, axis=-1)
             progress_score = 10.0 * (dist_now - dist_next) - 0.3 * dist_next

@@ -72,3 +72,35 @@ def test_double_integrator_env_success_and_collision_flags():
     assert bool(info["success"]) or bool(terminated)
     assert isinstance(info["collision"], bool)
     assert info["distance_to_goal"] <= env.goal_radius + 1e-6
+
+
+def test_double_integrator_env_collision_terminates_episode():
+    env = make_env()
+    env.reset(seed=4)
+    env.state = np.array([0.75, 0.0, 0.0, 0.0], dtype=np.float32)
+
+    _obs2, _r, terminated, truncated, info = env.step(np.zeros(2, dtype=np.float32))
+
+    assert info["collision"]
+    assert info["state_violation"]
+    assert terminated
+    assert not truncated
+
+
+def test_double_integrator_env_symmetric_path_progress_is_finite():
+    env = SafeObstacleDoubleIntegrator2DEnv(
+        noise_sigma=(0.0, 0.0),
+        use_filter=False,
+        seed=5,
+        reward_mode="symmetric_path_progress",
+    )
+    env.reset(seed=5)
+    env.state = np.array([-2.6, 0.0, 0.0, 0.0], dtype=np.float32)
+
+    obs_next, reward, terminated, truncated, info = env.step(np.array([0.0, 1.0], dtype=np.float32))
+
+    assert obs_next.shape == (10,)
+    assert np.isfinite(reward)
+    assert isinstance(terminated, bool)
+    assert isinstance(truncated, bool)
+    assert np.isfinite(info["distance_to_goal"])

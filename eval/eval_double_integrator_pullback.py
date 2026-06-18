@@ -31,6 +31,11 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from envs.safe_obstacle_double_integrator_2d import SafeObstacleDoubleIntegrator2DEnv
 
+CHECKPOINT_OBS_DIM_MISMATCH_MSG = (
+    "checkpoint observation dimension mismatch; "
+    "do not mix checkpoints across different env/map observation layouts"
+)
+
 
 def make_algo_kwargs(args):
     return dict(
@@ -100,55 +105,118 @@ def make_algo(args, obs_dim=8, act_dim=2):
 
 def obs_to_algo_obs(obs_real):
     obs_real = np.asarray(obs_real, dtype=np.float32)
-    if obs_real.shape != (10,):
-        raise ValueError("Expected 10-dim real double-integrator observation.")
-
-    px, py = float(obs_real[0]), float(obs_real[1])
-    goal_rel_x, goal_rel_y = float(obs_real[4]), float(obs_real[5])
-    clear = float(obs_real[8])
-    d_goal = float(obs_real[9])
-
-    # Mirror x so that algorithm's hard-coded safe-pullback goal remains at -2.6.
-    goal_alg_x = float(goal_rel_x)
-    goal_alg_y = -goal_rel_y
-    rel_obs_alg_x = -px
-    rel_obs_alg_y = py
-    return np.array(
-        [-px, py, goal_alg_x, goal_alg_y, rel_obs_alg_x, rel_obs_alg_y, clear, d_goal],
-        dtype=np.float32,
-    )
+    if obs_real.shape == (10,):
+        px, py = float(obs_real[0]), float(obs_real[1])
+        vx, vy = float(obs_real[2]), float(obs_real[3])
+        goal_rel_x, goal_rel_y = float(obs_real[4]), float(obs_real[5])
+        rel_obs_x, rel_obs_y = float(obs_real[6]), float(obs_real[7])
+        clear = float(obs_real[8])
+        d_goal = float(obs_real[9])
+        return np.array(
+            [
+                px,
+                py,
+                goal_rel_x,
+                goal_rel_y,
+                rel_obs_x,
+                rel_obs_y,
+                clear,
+                d_goal,
+                vx,
+                vy,
+            ],
+            dtype=np.float32,
+        )
+    if obs_real.shape == (16,):
+        px, py = float(obs_real[0]), float(obs_real[1])
+        vx, vy = float(obs_real[2]), float(obs_real[3])
+        goal_rel_x, goal_rel_y = float(obs_real[4]), float(obs_real[5])
+        d_goal = float(obs_real[6])
+        obstacle_block = obs_real[7:]
+        return np.concatenate(
+            [
+                np.array([px, py, goal_rel_x, goal_rel_y, d_goal, vx, vy], dtype=np.float32),
+                obstacle_block.astype(np.float32),
+            ],
+            axis=0,
+        )
+    raise ValueError(f"Unsupported double-integrator observation shape: {obs_real.shape}")
 
 
 def to_real_action(action_algo):
-    # Inverse mirror-x transform for actions.
     a = np.asarray(action_algo, dtype=np.float32).copy()
     a = np.clip(a, -1.0, 1.0)
-    a[0] = -a[0]
     return a
 
 
-def goal_controller(obs_real, goal=np.array([2.6, 0.0], dtype=np.float32)):
+def goal_controller(
+    obs_real,
+    goal=np.array([2.6, 0.0], dtype=np.float32),
+    map_id="single_circle",
+    start_y=0.0,
+    upper_route=None,
+    lower_route=None,
+):
     p = obs_real[:2]
     v = obs_real[2:4]
-    d = goal - p
+    if map_id != "three_circles":
+        d = goal - p
+        d_norm = float(np.linalg.norm(d) + 1e-6)
+        u = d / d_norm
+        v_term = -0.12 * v
+        return np.clip(u + v_term, -1.0, 1.0).astype(np.float32)
+
+    upper_route = [np.asarray(w, dtype=np.float32) for w in (upper_route or [])]
+    lower_route = [np.asarray(w, dtype=np.float32) for w in (lower_route or [])]
+    if start_y > 0.20:
+        route = upper_route
+    elif start_y < -0.20:
+        route = lower_route
+    else:
+        route = upper_route if p[1] >= 0.0 else lower_route
+    targets = list(route) + [np.asarray(goal, dtype=np.float32)]
+
+    target = targets[-1]
+    for wp in targets:
+        if np.linalg.norm(wp - p) > 0.30 and p[0] <= wp[0] + 0.25:
+            target = wp
+            break
+
+    d = target - p
     d_norm = float(np.linalg.norm(d) + 1e-6)
     u = d / d_norm
-    damp = 0.1
-    v_term = -0.12 * v
-    raw = np.clip(u + v_term, -1.0, 1.0).astype(np.float32)
-    raw = np.clip(raw + np.array([0.0, 0.0], dtype=np.float32), -1.0, 1.0)
-    return raw
+    v_term = -0.18 * v
+    return np.clip(u + v_term, -1.0, 1.0).astype(np.float32)
 
 
-def _classify_route(positions):
+def _classify_route(positions, map_id="single_circle"):
     traj = np.asarray(positions, dtype=np.float32)
     if traj.shape[0] == 0:
         return "unknown"
+    if map_id == "three_circles":
+        mask = (traj[:, 0] > -1.5) & (traj[:, 0] < 1.8)
+        corridor = traj[mask] if np.any(mask) else traj
+        y_mean = float(np.mean(corridor[:, 1]))
+        if y_mean > 0.25:
+            return "upper"
+        if y_mean < -0.25:
+            return "lower"
+        return "mixed"
     near = np.where(np.abs(traj[:, 0]) < 0.5)[0]
     if len(near) == 0:
         near = np.arange(traj.shape[0])
     y_mean = float(np.mean(traj[near, 1]))
     return "upper" if y_mean >= 0.0 else "lower"
+
+
+def _start_group(start_y, map_id="single_circle"):
+    if map_id == "three_circles":
+        if start_y > 0.25:
+            return "upper_start"
+        if start_y < -0.25:
+            return "lower_start"
+        return "middle_start"
+    return "all"
 
 
 def collect_double_integrator_eval_rollouts(
@@ -160,22 +228,28 @@ def collect_double_integrator_eval_rollouts(
     start_y_range=0.45,
     dt=0.1,
     a_max=3.0,
+    noise_pos=0.0,
+    noise_vel=0.0,
     use_handcrafted_controller=False,
     goal=np.array([2.6, 0.0], dtype=np.float32),
+    env_kwargs=None,
 ):
+    env_kwargs = dict(env_kwargs or {})
     env = SafeObstacleDoubleIntegrator2DEnv(
-        noise_sigma=(0.0, 0.0),
+        noise_sigma=(noise_pos, noise_vel),
         use_filter=algo != "vanilla_flow" or agent is not None,
         seed=seed,
         start_y_range=start_y_range,
         dt=dt,
         a_max=a_max,
+        **env_kwargs,
     )
     env.set_action_gain(1.0 - float(delta))
 
     t_max = env.episode_len
+    obs_dim = int(env.observation_space.shape[0])
     positions = np.zeros((episodes, t_max + 1, 2), dtype=np.float32)
-    obs_all = np.zeros((episodes, t_max + 1, 10), dtype=np.float32)
+    obs_all = np.zeros((episodes, t_max + 1, obs_dim), dtype=np.float32)
     raw_actions = np.zeros((episodes, t_max, 2), dtype=np.float32)
     exec_actions = np.zeros((episodes, t_max, 2), dtype=np.float32)
     rewards = np.zeros((episodes, t_max), dtype=np.float32)
@@ -191,9 +265,11 @@ def collect_double_integrator_eval_rollouts(
     time_to_goal = np.full((episodes,), t_max, dtype=np.int32)
     valid_lengths = np.full((episodes,), t_max + 1, dtype=np.int32)
     episode_return = np.zeros((episodes,), dtype=np.float32)
+    start_ys = np.zeros((episodes,), dtype=np.float32)
 
     for i in range(episodes):
-        obs_real, _ = env.reset(seed=seed + i + 1)
+        obs_real, reset_info = env.reset(seed=seed + i + 1)
+        start_ys[i] = float(reset_info.get("start_y", obs_real[1]))
         obs_all[i, 0] = obs_real
         positions[i, 0] = obs_real[:2]
         key = jax.random.PRNGKey(seed + 999 + i)
@@ -201,7 +277,14 @@ def collect_double_integrator_eval_rollouts(
         for t in range(t_max):
             obs_algo = obs_to_algo_obs(obs_real)
             if use_handcrafted_controller or agent is None:
-                raw_algo = goal_controller(obs_real, goal=goal)
+                raw_algo = goal_controller(
+                    obs_real,
+                    goal=goal,
+                    map_id=env.map_id,
+                    start_y=float(start_ys[i]),
+                    upper_route=getattr(env, "upper_route", None),
+                    lower_route=getattr(env, "lower_route", None),
+                )
             else:
                 key, k = jax.random.split(key)
                 raw_algo = np.asarray(agent.get_action(k, obs_algo[None, :])[0], dtype=np.float32)
@@ -223,7 +306,7 @@ def collect_double_integrator_eval_rollouts(
             distance_to_obstacle[i, t] = float(info["clearance"])
 
             episode_return[i] += float(r)
-            if term and not is_success[i]:
+            if bool(info.get("success", False)) and not is_success[i]:
                 is_success[i] = True
                 time_to_goal[i] = t + 1
             if term or trunc:
@@ -236,26 +319,30 @@ def collect_double_integrator_eval_rollouts(
     # Metrics
     collision = distance_to_obstacle <= 0.0
     h_min = np.array([np.min(distance_to_obstacle[i, : valid_lengths[i] - 1]) for i in range(episodes)], dtype=np.float32)
-    violation_mean = np.mean((state_violation | tight_violation), axis=1)
+    final_distance = np.array(
+        [distance_to_goal[i, max(valid_lengths[i] - 2, 0)] for i in range(episodes)],
+        dtype=np.float32,
+    )
+    violation_mean = np.array(
+        [
+            np.mean((state_violation[i, : valid_lengths[i] - 1] | tight_violation[i, : valid_lengths[i] - 1]).astype(np.float32))
+            for i in range(episodes)
+        ],
+        dtype=np.float32,
+    )
+    collision_episode = np.array(
+        [np.any(collision[i, : valid_lengths[i] - 1]) for i in range(episodes)],
+        dtype=bool,
+    )
 
     route_tags = []
     for i in range(episodes):
-        if is_success[i]:
-            route = _classify_route(positions[i, : time_to_goal[i] + 1])
-        else:
-            route = "unknown"
+        route = _classify_route(positions[i, : valid_lengths[i]], map_id=env.map_id)
         route_tags.append(route)
 
-    success_idx = np.where(is_success)[0]
-    upper = int(np.sum([route_tags[i] == "upper" for i in success_idx]))
-    lower = int(np.sum([route_tags[i] == "lower" for i in success_idx]))
-    total_success = int(np.sum(is_success))
-    if total_success > 0:
-        route_upper_fraction = upper / max(total_success, 1)
-        route_lower_fraction = lower / max(total_success, 1)
-    else:
-        route_upper_fraction = 0.0
-        route_lower_fraction = 0.0
+    route_upper_fraction = float(np.mean([tag == "upper" for tag in route_tags]))
+    route_lower_fraction = float(np.mean([tag == "lower" for tag in route_tags]))
+    route_mixed_fraction = float(np.mean([tag == "mixed" for tag in route_tags]))
 
     step_mask = np.arange(t_max)[None, :] < (valid_lengths - 1)[:, None]
     mask_count = max(int(np.sum(step_mask)), 1)
@@ -264,7 +351,7 @@ def collect_double_integrator_eval_rollouts(
         "return_mean": float(np.mean(episode_return)),
         "return_std": float(np.std(episode_return)),
         "success_rate": float(np.mean(is_success)),
-        "collision_rate": float(np.mean(np.any(collision, axis=1))),
+        "collision_rate": float(np.mean(collision_episode)),
         "violation_rate": float(np.sum(violation_mean * 1.0) / episodes),
         "h_min_mean": float(np.mean(h_min)),
         "h_min_std": float(np.std(h_min)),
@@ -273,10 +360,37 @@ def collect_double_integrator_eval_rollouts(
         "filter_activation_rate": float(np.mean(filter_active[step_mask]) if mask_count > 0 else 0.0),
         "route_upper_fraction": float(route_upper_fraction),
         "route_lower_fraction": float(route_lower_fraction),
+        "route_mixed_fraction": float(route_mixed_fraction),
         "filter_fallback_rate": float(np.mean(filter_fallback[step_mask]) if mask_count > 0 else 0.0),
-        "min_margin": float(np.min(distance_to_obstacle)),
-        "max_margin": float(np.max(distance_to_obstacle)),
+        "min_margin": float(np.min(distance_to_obstacle[step_mask])) if mask_count > 0 else 0.0,
+        "max_margin": float(np.max(distance_to_obstacle[step_mask])) if mask_count > 0 else 0.0,
+        "final_distance_mean": float(np.mean(final_distance)),
+        "final_distance_std": float(np.std(final_distance)),
+        "final_distance_q25": float(np.quantile(final_distance, 0.25)),
+        "final_distance_q50": float(np.quantile(final_distance, 0.50)),
+        "final_distance_q75": float(np.quantile(final_distance, 0.75)),
+        "final_distance_q90": float(np.quantile(final_distance, 0.90)),
     }
+
+    if env.map_id == "three_circles":
+        for group in ["upper_start", "middle_start", "lower_start"]:
+            mask = np.array([_start_group(y, env.map_id) == group for y in start_ys], dtype=bool)
+            if np.any(mask):
+                summary[f"{group}_upper_route_fraction"] = float(np.mean([route_tags[i] == "upper" for i in np.where(mask)[0]]))
+                summary[f"{group}_lower_route_fraction"] = float(np.mean([route_tags[i] == "lower" for i in np.where(mask)[0]]))
+                summary[f"{group}_mixed_route_fraction"] = float(np.mean([route_tags[i] == "mixed" for i in np.where(mask)[0]]))
+                summary[f"{group}_success_rate"] = float(np.mean(is_success[mask]))
+                summary[f"{group}_collision_rate"] = float(np.mean(collision_episode[mask]))
+                summary[f"{group}_h_min_mean"] = float(np.mean(h_min[mask]))
+                summary[f"{group}_J_eval_mean"] = float(np.mean(-episode_return[mask]))
+            else:
+                summary[f"{group}_upper_route_fraction"] = 0.0
+                summary[f"{group}_lower_route_fraction"] = 0.0
+                summary[f"{group}_mixed_route_fraction"] = 0.0
+                summary[f"{group}_success_rate"] = 0.0
+                summary[f"{group}_collision_rate"] = 0.0
+                summary[f"{group}_h_min_mean"] = 0.0
+                summary[f"{group}_J_eval_mean"] = 0.0
 
     rollout_data = dict(
         positions=positions,
@@ -294,6 +408,7 @@ def collect_double_integrator_eval_rollouts(
         distance_to_obstacle=distance_to_obstacle,
         is_success=is_success,
         route_tags=np.asarray(route_tags),
+        start_y=start_ys,
         time_to_goal=time_to_goal,
         valid_lengths=valid_lengths,
         episode_return=episode_return,
@@ -302,9 +417,18 @@ def collect_double_integrator_eval_rollouts(
 
 
 def load_double_integrator_agent(checkpoint):
-    with open(checkpoint, "rb") as f:
-        ckpt = pickle.load(f)
+    try:
+        with open(checkpoint, "rb") as f:
+            ckpt = pickle.load(f)
+    except Exception:
+        cpu_device = jax.devices("cpu")[0]
+        with open(checkpoint, "rb") as f:
+            with jax.default_device(cpu_device):
+                ckpt = pickle.load(f)
     saved = ckpt.get("args", {})
+    saved_obs_dim = saved.get("obs_dim", ckpt.get("obs_dim", None))
+    if saved_obs_dim is None or int(saved_obs_dim) <= 0:
+        raise ValueError(CHECKPOINT_OBS_DIM_MISMATCH_MSG)
     args = argparse.Namespace(**{
         "seed": ckpt.get("seed", 0),
         "gamma": 0.99,
@@ -346,13 +470,73 @@ def load_double_integrator_agent(checkpoint):
         "policy_noise_scale": 0.3,
         "hidden_sizes": "256,256,256",
         "diffusion_hidden_sizes": "256,256,256",
+        "obs_dim": int(saved_obs_dim),
     })
     for k, v in saved.items():
         if hasattr(args, k):
             setattr(args, k, v)
-    agent = make_algo(args)
-    agent.state = ckpt["agent_state"]
-    return agent
+    args.obs_dim = int(saved.get("obs_dim", getattr(args, "obs_dim", 10)))
+    agent = make_algo(args, obs_dim=args.obs_dim)
+    try:
+        agent.state = ckpt["agent_state"]
+    except Exception as exc:
+        raise ValueError(CHECKPOINT_OBS_DIM_MISMATCH_MSG) from exc
+    return agent, saved
+
+
+def _float_arg_or_saved(cli_value, saved_args, key, default):
+    return float(saved_args.get(key, default) if cli_value is None else cli_value)
+
+
+def _int_arg_or_saved(cli_value, saved_args, key, default):
+    return int(saved_args.get(key, default) if cli_value is None else cli_value)
+
+
+def build_env_kwargs(args, saved_args):
+    args_get = lambda key, default=None: getattr(args, key, default)
+    reward_cfg = dict(
+        progress_coef=_float_arg_or_saved(args_get("reward_progress_coef"), saved_args, "reward_progress_coef", 8.0),
+        success_bonus=_float_arg_or_saved(args_get("reward_success_bonus"), saved_args, "reward_success_bonus", 100.0),
+        collision_penalty=_float_arg_or_saved(
+            args_get("reward_collision_penalty"), saved_args, "reward_collision_penalty", 100.0
+        ),
+        near_obs_coef=_float_arg_or_saved(args_get("reward_near_obs_coef"), saved_args, "reward_near_obs_coef", 8.0),
+        safety_buffer=_float_arg_or_saved(args_get("reward_safety_buffer"), saved_args, "reward_safety_buffer", 0.20),
+        action_coef=_float_arg_or_saved(args_get("reward_action_coef"), saved_args, "reward_action_coef", 0.03),
+        speed_coef=_float_arg_or_saved(args_get("reward_speed_coef"), saved_args, "reward_speed_coef", 0.01),
+        time_coef=_float_arg_or_saved(args_get("reward_time_coef"), saved_args, "reward_time_coef", 0.01),
+        route_softmin_beta=_float_arg_or_saved(
+            args_get("reward_route_softmin_beta"), saved_args, "reward_route_softmin_beta", 0.0
+        ),
+        route_start_bias_scale=_float_arg_or_saved(
+            args_get("reward_route_start_bias_scale"), saved_args, "reward_route_start_bias_scale", 0.0
+        ),
+        goal_progress_mix=_float_arg_or_saved(
+            args_get("reward_goal_progress_mix"), saved_args, "reward_goal_progress_mix", 0.0
+        ),
+        terminal_goal_bonus_radius=_float_arg_or_saved(
+            args_get("terminal_goal_bonus_radius"), saved_args, "terminal_goal_bonus_radius", 0.0
+        ),
+        terminal_goal_bonus_coef=_float_arg_or_saved(
+            args_get("terminal_goal_bonus_coef"), saved_args, "terminal_goal_bonus_coef", 0.0
+        ),
+    )
+    return dict(
+        map_id=str(saved_args.get("map_id", args_get("map_id", "single_circle"))),
+        route_variant=str(saved_args.get("route_variant", args_get("route_variant", "baseline"))),
+        obs_mode=saved_args.get("obs_mode", args_get("obs_mode", None)),
+        start_y_range=_float_arg_or_saved(args_get("start_y_range"), saved_args, "start_y_range", 0.45),
+        dt=_float_arg_or_saved(args_get("dt"), saved_args, "dt", 0.1),
+        a_max=_float_arg_or_saved(args_get("a_max"), saved_args, "a_max", 3.0),
+        v_max=_float_arg_or_saved(args_get("v_max"), saved_args, "v_max", 2.0),
+        damping=_float_arg_or_saved(args_get("damping"), saved_args, "damping", 0.98),
+        episode_len=_int_arg_or_saved(args_get("episode_len"), saved_args, "episode_len", 200),
+        goal_radius=_float_arg_or_saved(args_get("goal_radius"), saved_args, "goal_radius", 0.18),
+        goal_radius_overridden=bool(args_get("goal_radius") is not None),
+        eps_obs=_float_arg_or_saved(args_get("eps_obs"), saved_args, "eps_obs", 0.08),
+        reward_mode=str(saved_args.get("reward_mode", args_get("reward_mode", "goal_progress"))),
+        reward_cfg=reward_cfg,
+    )
 
 
 def main():
@@ -364,10 +548,32 @@ def main():
     p.add_argument("--delta", type=float, default=0.0)
     p.add_argument("--outdir", required=True)
     p.add_argument("--use_handcrafted_controller", action="store_true", default=False)
-    p.add_argument("--start_y_range", type=float, default=0.45)
+    p.add_argument("--start_y_range", type=float, default=None)
     p.add_argument("--save_rollouts", action="store_true", default=False)
-    p.add_argument("--dt", type=float, default=0.1)
-    p.add_argument("--a_max", type=float, default=3.0)
+    p.add_argument("--dt", type=float, default=None)
+    p.add_argument("--a_max", type=float, default=None)
+    p.add_argument("--v_max", type=float, default=None)
+    p.add_argument("--damping", type=float, default=None)
+    p.add_argument("--episode_len", type=int, default=None)
+    p.add_argument("--goal_radius", type=float, default=None)
+    p.add_argument("--eps_obs", type=float, default=None)
+    p.add_argument("--map_id", choices=["single_circle", "three_circles"], default="single_circle")
+    p.add_argument("--route_variant", type=str, default="baseline")
+    p.add_argument("--obs_mode", choices=["single_obstacle", "all_obstacles"], default=None)
+    p.add_argument("--reward_progress_coef", type=float, default=None)
+    p.add_argument("--reward_success_bonus", type=float, default=None)
+    p.add_argument("--reward_collision_penalty", type=float, default=None)
+    p.add_argument("--reward_near_obs_coef", type=float, default=None)
+    p.add_argument("--reward_safety_buffer", type=float, default=None)
+    p.add_argument("--reward_action_coef", type=float, default=None)
+    p.add_argument("--reward_speed_coef", type=float, default=None)
+    p.add_argument("--reward_time_coef", type=float, default=None)
+    p.add_argument("--reward_route_softmin_beta", type=float, default=None)
+    p.add_argument("--reward_route_start_bias_scale", type=float, default=None)
+    p.add_argument("--reward_goal_progress_mix", type=float, default=None)
+    p.add_argument("--terminal_goal_bonus_radius", type=float, default=None)
+    p.add_argument("--terminal_goal_bonus_coef", type=float, default=None)
+    p.add_argument("--reward_mode", choices=["goal_progress", "symmetric_path_progress", "multi_route_progress"], default="goal_progress")
     # algorithm arguments used for agent loading
     p.add_argument("--lr", type=float, default=3e-4)
     p.add_argument("--alpha_lr", type=float, default=1e-2)
@@ -380,6 +586,7 @@ def main():
     p.add_argument("--diffusion_steps", type=int, default=10)
     p.add_argument("--num_ent_timesteps", type=int, default=10)
     p.add_argument("--policy_noise_scale", type=float, default=0.3)
+    p.add_argument("--obs_dim", type=int, default=8)
     p.add_argument("--gamma", type=float, default=0.99)
     p.add_argument("--gamma_p", type=float, default=0.99)
     p.add_argument("--lambda_p_warmup_steps", type=int, default=100000)
@@ -415,9 +622,12 @@ def main():
 
     if args.use_handcrafted_controller or args.checkpoint is None:
         agent = None
+        saved_args = {}
         args.use_tn_energy = False
     else:
-        agent = load_double_integrator_agent(args.checkpoint)
+        agent, saved_args = load_double_integrator_agent(args.checkpoint)
+
+    env_kwargs = build_env_kwargs(args, saved_args)
 
     rollouts, summary = collect_double_integrator_eval_rollouts(
         agent,
@@ -425,13 +635,35 @@ def main():
         episodes=args.episodes,
         seed=args.seed,
         delta=args.delta,
-        start_y_range=args.start_y_range,
-        dt=args.dt,
-        a_max=args.a_max,
+        start_y_range=env_kwargs["start_y_range"],
+        dt=env_kwargs["dt"],
+        a_max=env_kwargs["a_max"],
+        noise_pos=0.0,
+        noise_vel=0.0,
         use_handcrafted_controller=args.use_handcrafted_controller or args.algo == "handcrafted",
+        env_kwargs={
+            "v_max": env_kwargs["v_max"],
+            "damping": env_kwargs["damping"],
+            "episode_len": env_kwargs["episode_len"],
+            "goal_radius": env_kwargs["goal_radius"],
+            "eps_obs": env_kwargs["eps_obs"],
+            "map_id": env_kwargs["map_id"],
+            "route_variant": env_kwargs["route_variant"],
+            "obs_mode": env_kwargs["obs_mode"],
+            "reward_mode": env_kwargs["reward_mode"],
+            "reward_cfg": env_kwargs["reward_cfg"],
+        },
     )
 
+    summary["goal_radius"] = float(env_kwargs["goal_radius"])
+    summary["goal_radius_overridden"] = bool(env_kwargs["goal_radius_overridden"])
+    summary["reward_goal_progress_mix"] = float(env_kwargs["reward_cfg"].get("goal_progress_mix", 0.0))
+    summary["reward_near_obs_coef"] = float(env_kwargs["reward_cfg"].get("near_obs_coef", 0.0))
+    summary["terminal_goal_bonus_radius"] = float(env_kwargs["reward_cfg"].get("terminal_goal_bonus_radius", 0.0))
+    summary["terminal_goal_bonus_coef"] = float(env_kwargs["reward_cfg"].get("terminal_goal_bonus_coef", 0.0))
+
     np.savez(outdir / "rollouts.npz", **rollouts)
+    (outdir / "env_config.json").write_text(json.dumps(env_kwargs, indent=2))
     (outdir / "eval_summary.json").write_text(json.dumps(summary, indent=2))
     with open(outdir / "eval_metrics.csv", "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=list(summary.keys()))

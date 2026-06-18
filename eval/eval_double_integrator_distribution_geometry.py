@@ -1,114 +1,84 @@
 import argparse
+import csv
 import json
-import pickle
 from pathlib import Path
 
 import jax
 import numpy as np
 
 from envs.safe_obstacle_double_integrator_2d import SafeObstacleDoubleIntegrator2DEnv
-from relax.utils.curvature import (
-    covariance_from_curvature,
-    covariance_variances,
-    default_double_integrator,
-    default_lqr_config,
-    full_robust_curvature,
-    nominal_curvature,
-    pbar_tau,
-    safety_curvature,
-    solve_discounted_riccati,
-)
-from relax.utils.curvature import nlr_tcr
-from eval.eval_double_integrator_pullback import (
-    load_double_integrator_agent,
-    obs_to_algo_obs,
+from eval.eval_double_integrator_pullback import build_env_kwargs, load_double_integrator_agent, obs_to_algo_obs
+from relax.utils.pullback_geometry import (
+    empirical_covariance_local,
+    local_normal_tangent,
+    multi_obstacle_curvature_covariances_double_integrator,
+    to_normal_tangent_frame,
 )
 
 
-def make_state_observation(pos, goal, obstacle_center):
-    pos = np.asarray(pos, dtype=np.float32)
-    rel_goal = goal - pos
-    rel_obs = pos - obstacle_center
-    clearance = float(np.linalg.norm(rel_obs) - 0.8)
-    d_goal = float(np.linalg.norm(rel_goal))
-    obs = np.array(
-        [
-            float(pos[0]),
-            float(pos[1]),
-            0.0,
-            0.0,
-            float(rel_goal[0]),
-            float(rel_goal[1]),
-            float(rel_obs[0]),
-            float(rel_obs[1]),
-            clearance,
-            d_goal,
-        ],
-        dtype=np.float32,
-    )
-    return obs
-
-
-def sample_policy_actions(agent, obs, num_samples, seed, goal_obs=False):
+def sample_policy_actions(agent, obs, num_samples, seed):
     if agent is None:
         return np.zeros((num_samples, 2), dtype=np.float32)
-    obs_algo = obs_to_algo_obs(obs)
-    obs_algo = obs_algo[None, :]
-    rng = np.random.default_rng(seed)
+    obs_algo = obs_to_algo_obs(obs)[None, :]
     actions = np.zeros((num_samples, 2), dtype=np.float32)
     key = jax.random.PRNGKey(seed + 11)
     for i in range(num_samples):
         key, k = jax.random.split(key)
         raw = np.asarray(agent.get_action(k, obs_algo)[0], dtype=np.float32)
         actions[i] = np.clip(raw, -1.0, 1.0)
-    # ensure diversity even if JAX RNG saturates
-    if np.linalg.matrix_rank(np.cov(actions.T) if num_samples > 2 else np.eye(2)) == 0:
-        actions = actions + 1e-3 * rng.normal(size=actions.shape)
-    return np.clip(actions, -1.0, 1.0)
+    return actions
 
 
-def make_state_grid(r_eval, num_states):
+def _cov_stats_local(cov_local):
+    cov_local = 0.5 * (np.asarray(cov_local, dtype=np.float64) + np.asarray(cov_local, dtype=np.float64).T)
+    normal_var = float(cov_local[0, 0])
+    tangent_var = float(cov_local[1, 1])
+    denom = max(normal_var + tangent_var, 1e-12)
+    nlr = normal_var / denom
+    tcr = tangent_var / denom
+    return normal_var, tangent_var, nlr, tcr
+
+
+def _row(state_id, obstacle_id, method, pos, vel, clearance, cov_local):
+    normal_var, tangent_var, nlr, tcr = _cov_stats_local(cov_local)
+    return dict(
+        state_id=int(state_id),
+        obstacle_id=int(obstacle_id),
+        method=method,
+        px=float(pos[0]),
+        py=float(pos[1]),
+        vx=float(vel[0]),
+        vy=float(vel[1]),
+        clearance=float(clearance),
+        normal_var=float(normal_var),
+        tangent_var=float(tangent_var),
+        nlr=float(nlr),
+        tcr=float(tcr),
+        trace=float(np.trace(cov_local)),
+        det=float(np.linalg.det(cov_local)),
+    )
+
+
+def _make_states_single(env, num_states):
+    radius_eval = env.obstacle_radii[0] + env.eps_obs + 0.04
     angles = np.linspace(0.0, 2.0 * np.pi, num_states, endpoint=False)
     states = []
-    for a in angles:
-        px = r_eval * np.cos(a)
-        py = r_eval * np.sin(a)
-        if abs(py) < 0.12:
-            py *= 1.8
-        states.append((float(px), float(py)))
+    for angle in angles:
+        center = env.obstacle_centers[0]
+        pos = center + radius_eval * np.array([np.cos(angle), np.sin(angle)], dtype=np.float32)
+        states.append((0, pos))
     return states
 
 
-def estimate_sigma_cov_from_actions(actions):
-    if actions.ndim != 2 or actions.shape[1] != 2:
-        raise ValueError("actions must be [N,2]")
-    mean = actions.mean(axis=0, keepdims=True)
-    centered = actions - mean
-    if centered.shape[0] <= 1:
-        return np.eye(2, dtype=np.float64)
-    cov = centered.T @ centered / max(centered.shape[0] - 1, 1)
-    return 0.5 * (cov + cov.T)
-
-
-def compute_diagnostic_row(state_id, method, obs, Sigma, D, clearance):
-    n, t = covariance_variances(Sigma, D)
-    nl, tr = nlr_tcr(Sigma, D)
-    row = dict(
-        state_id=state_id,
-        method=method,
-        px=float(obs[0]),
-        py=float(obs[1]),
-        vx=float(obs[2]),
-        vy=float(obs[3]),
-        clearance=float(clearance),
-        normal_var=float(n),
-        tangent_var=float(t),
-        nlr=float(nl),
-        tcr=float(tr),
-        trace=float(np.trace(Sigma)),
-        det=float(np.linalg.det(Sigma)),
-    )
-    return row
+def _make_states_multi(env, num_states_per_obstacle):
+    states = []
+    for obs_id, (center, radius) in enumerate(zip(env.obstacle_centers, env.obstacle_radii)):
+        radius_eval = float(radius + env.eps_obs + 0.05)
+        angles = np.linspace(0.0, 2.0 * np.pi, num_states_per_obstacle, endpoint=False)
+        for angle in angles:
+            pos = center + radius_eval * np.array([np.cos(angle), np.sin(angle)], dtype=np.float32)
+            states.append((obs_id, pos))
+    return states
 
 
 def main():
@@ -117,131 +87,145 @@ def main():
     p.add_argument("--curvature_checkpoint", required=True)
     p.add_argument("--outdir", required=True)
     p.add_argument("--num_states", type=int, default=8)
+    p.add_argument("--num_states_per_obstacle", type=int, default=4)
     p.add_argument("--num_action_samples", type=int, default=4096)
     p.add_argument("--seed", type=int, default=0)
-    p.add_argument("--dt", type=float, default=0.1)
-    p.add_argument("--a_max", type=float, default=3.0)
-    p.add_argument("--lambda_safe", type=float, default=100.0)
-    p.add_argument("--robust_iso", type=float, default=0.2)
-    p.add_argument("--obs_radius", type=float, default=0.8)
-    p.add_argument("--eps_obs", type=float, default=0.08)
+    p.add_argument("--start_y_range", type=float, default=None)
+    p.add_argument("--dt", type=float, default=None)
+    p.add_argument("--a_max", type=float, default=None)
+    p.add_argument("--v_max", type=float, default=None)
+    p.add_argument("--damping", type=float, default=None)
+    p.add_argument("--episode_len", type=int, default=None)
+    p.add_argument("--eps_obs", type=float, default=None)
+    p.add_argument("--map_id", choices=["single_circle", "three_circles"], default="single_circle")
+    p.add_argument("--route_variant", type=str, default="baseline")
+    p.add_argument("--obs_mode", choices=["single_obstacle", "all_obstacles"], default=None)
+    p.add_argument("--reward_mode", choices=["goal_progress", "symmetric_path_progress", "multi_route_progress"], default="goal_progress")
+    p.add_argument("--goal_radius", type=float, default=None)
+    p.add_argument("--reward_progress_coef", type=float, default=None)
+    p.add_argument("--reward_success_bonus", type=float, default=None)
+    p.add_argument("--reward_collision_penalty", type=float, default=None)
+    p.add_argument("--reward_near_obs_coef", type=float, default=None)
+    p.add_argument("--reward_safety_buffer", type=float, default=None)
+    p.add_argument("--reward_action_coef", type=float, default=None)
+    p.add_argument("--reward_speed_coef", type=float, default=None)
+    p.add_argument("--reward_time_coef", type=float, default=None)
+    p.add_argument("--reward_route_softmin_beta", type=float, default=None)
+    p.add_argument("--reward_route_start_bias_scale", type=float, default=None)
+    p.add_argument("--reward_goal_progress_mix", type=float, default=None)
+    p.add_argument("--terminal_goal_bonus_radius", type=float, default=None)
+    p.add_argument("--terminal_goal_bonus_coef", type=float, default=None)
+    p.add_argument("--lambda_safe", type=float, default=4.0)
+    p.add_argument("--lambda_eps", type=float, default=0.05)
+    p.add_argument("--lambda_clip", type=float, default=120.0)
+    p.add_argument("--lambda_robust", type=float, default=40.0)
+    p.add_argument("--robust_iso", type=float, default=0.25)
     args = p.parse_args()
 
     outdir = Path(args.outdir)
     outdir.mkdir(parents=True, exist_ok=True)
 
-    goal = np.array([2.6, 0.0], dtype=np.float32)
+    vanilla_agent, vanilla_saved = load_double_integrator_agent(args.vanilla_checkpoint)
+    curvature_agent, curvature_saved = load_double_integrator_agent(args.curvature_checkpoint)
+    env_kwargs = build_env_kwargs(args, curvature_saved)
     env = SafeObstacleDoubleIntegrator2DEnv(
         noise_sigma=(0.0, 0.0),
         use_filter=False,
-        dt=args.dt,
-        a_max=args.a_max,
+        seed=args.seed,
+        map_id=env_kwargs["map_id"],
+        route_variant=env_kwargs["route_variant"],
+        obs_mode=env_kwargs["obs_mode"],
+        start_y_range=env_kwargs["start_y_range"],
+        dt=env_kwargs["dt"],
+        a_max=env_kwargs["a_max"],
+        v_max=env_kwargs["v_max"],
+        damping=env_kwargs["damping"],
+        episode_len=env_kwargs["episode_len"],
+        goal_radius=env_kwargs["goal_radius"],
+        eps_obs=env_kwargs["eps_obs"],
+        reward_mode=env_kwargs["reward_mode"],
+        reward_cfg=env_kwargs["reward_cfg"],
     )
-    env.goal = goal
 
-    vanilla_agent = load_double_integrator_agent(args.vanilla_checkpoint)
-    curvature_agent = load_double_integrator_agent(args.curvature_checkpoint)
-
-    cfg = default_lqr_config()
-    cfg["dt"] = args.dt
-    A, B = default_double_integrator(dt=cfg["dt"])
-    P, K = solve_discounted_riccati(A, B, cfg["Q"], cfg["R"], rho=cfg["rho"])
-    rho = float(cfg["rho"])
-    M0 = nominal_curvature(P, B, cfg["R"], cfg["rho"])
-    Sigma0 = covariance_from_curvature(M0)
-    SigmaIso = covariance_from_curvature(M0)
-
-    E = B
-    Phi_u = np.eye(2)
-    W_P = E.T @ P @ E
-    tau = rho * np.max(np.linalg.eigvalsh(E.T @ P @ E)) * 1.1 + 1e-3
-
-    r_eval = args.obs_radius + args.eps_obs + 0.04
-    states = make_state_grid(r_eval, args.num_states)
+    if env.map_id == "three_circles":
+        states = _make_states_multi(env, args.num_states_per_obstacle)
+    else:
+        states = _make_states_single(env, args.num_states)
 
     rows = []
-    rows_samples = []
-    for sid, (px, py) in enumerate(states):
-        obs = make_state_observation(np.array([px, py], dtype=np.float32), goal=goal, obstacle_center=np.array([0.0, 0.0], dtype=np.float32))
-        clearance = float(obs[8])
-        d = np.array([obs[0], obs[1]], dtype=np.float64)
-        if np.linalg.norm(d) < 1e-8:
-            d = np.array([1.0, 0.0], dtype=np.float64)
-        d_unit = d / np.linalg.norm(d)
-        C_active = np.zeros((1, 4), dtype=np.float64)
-        C_active[0, :2] = d_unit
+    sample_rows = []
+    vel = np.zeros(2, dtype=np.float32)
 
-        Sigma_nom = Sigma0
-        M_nom = M0
-        M_safe = M0 + safety_curvature(B, C_active, np.array([[args.lambda_safe]], dtype=np.float64))
-        Sigma_safe = covariance_from_curvature(M_safe)
-
-        Lambda_b = np.array([[args.lambda_safe]], dtype=np.float64)
-        robust_tau = cfg["rho"] * np.max(np.linalg.eigvalsh(E.T @ P @ E)) * 1.1 + 1e-3
-        M_robust, _, _ = full_robust_curvature(
-            P,
-            B,
-            cfg["R"],
-            C_active,
-            Lambda_b,
-            rho,
-            E,
-            Phi_u,
-            W_P,
-            robust_tau,
-            eps=args.eps_obs,
+    for sid, (anchor_obstacle_id, pos) in enumerate(states):
+        state = np.array([pos[0], pos[1], vel[0], vel[1]], dtype=np.float32)
+        obs = env._get_obs_from_state(state)
+        stats = multi_obstacle_curvature_covariances_double_integrator(
+            pos=pos,
+            vel=vel,
+            obstacle_centers=env.obstacle_centers,
+            obstacle_radii=env.obstacle_radii,
+            dt=env.dt,
+            a_max=env.a_max,
+            lambda_scale=args.lambda_safe,
+            lambda_eps=args.lambda_eps,
+            lambda_clip=args.lambda_clip,
+            lambda_robust=args.lambda_robust,
+            robust_iso=args.robust_iso,
         )
-        Sigma_robust = covariance_from_curvature(M_robust)
+        nearest_id = int(stats["nearest_obstacle_id"])
+        clearance = float(stats["clearances"][nearest_id])
+        normal = np.asarray(stats["normal"], dtype=np.float64)
+        tangent = np.asarray(stats["tangent"], dtype=np.float64)
 
-        D_mat = B.T @ C_active.T
+        vanilla_actions = sample_policy_actions(vanilla_agent, obs, args.num_action_samples, args.seed + sid)
+        curvature_actions = sample_policy_actions(curvature_agent, obs, args.num_action_samples, args.seed + 10000 + sid)
+        cov_vanilla_local, *_ = empirical_covariance_local(vanilla_actions, pos=pos, center=env.obstacle_centers[nearest_id])
+        cov_curvature_local, *_ = empirical_covariance_local(curvature_actions, pos=pos, center=env.obstacle_centers[nearest_id])
 
-        rows.append(compute_diagnostic_row(sid, "Nominal LQR", obs, Sigma_nom, D_mat, clearance))
-        rows.append(compute_diagnostic_row(sid, "Safety-shaped", obs, Sigma_safe, D_mat, clearance))
-        rows.append(compute_diagnostic_row(sid, "Robust-shaped", obs, Sigma_robust, D_mat, clearance))
+        rows.append(_row(sid, nearest_id, "Nominal", pos, vel, clearance, stats["cov_nominal_local"]))
+        rows.append(_row(sid, nearest_id, "Safety-shaped", pos, vel, clearance, stats["cov_safety_local"]))
+        rows.append(_row(sid, nearest_id, "Robust-shaped", pos, vel, clearance, stats["cov_robust_local"]))
+        rows.append(_row(sid, nearest_id, "Vanilla Flow", pos, vel, clearance, cov_vanilla_local))
+        rows.append(_row(sid, nearest_id, "Curvature-Shaped Flow", pos, vel, clearance, cov_curvature_local))
 
-        act_v = sample_policy_actions(vanilla_agent, obs, args.num_action_samples, args.seed + sid, goal_obs=False)
-        act_c = sample_policy_actions(curvature_agent, obs, args.num_action_samples, args.seed + 10_000 + sid, goal_obs=False)
+        sample_rows.append(
+            dict(
+                state_id=int(sid),
+                obstacle_id=int(nearest_id),
+                anchor_obstacle_id=int(anchor_obstacle_id),
+                px=float(pos[0]),
+                py=float(pos[1]),
+                clearance=float(clearance),
+                normal=normal,
+                tangent=tangent,
+                actions_vanilla=vanilla_actions,
+                actions_curvature=curvature_actions,
+                actions_vanilla_local=to_normal_tangent_frame(vanilla_actions, normal, tangent),
+                actions_curvature_local=to_normal_tangent_frame(curvature_actions, normal, tangent),
+                Sigma_nominal=stats["cov_nominal"],
+                Sigma_safe=stats["cov_safety"],
+                Sigma_robust=stats["cov_robust"],
+                Sigma_nominal_local=stats["cov_nominal_local"],
+                Sigma_safe_local=stats["cov_safety_local"],
+                Sigma_robust_local=stats["cov_robust_local"],
+                Sigma_vanilla_local=cov_vanilla_local,
+                Sigma_curvature_local=cov_curvature_local,
+            )
+        )
 
-        Sigma_v = estimate_sigma_cov_from_actions(act_v)
-        Sigma_c = estimate_sigma_cov_from_actions(act_c)
-        rows.append(compute_diagnostic_row(sid, "Vanilla Flow", obs, Sigma_v, D_mat, clearance))
-        rows.append(compute_diagnostic_row(sid, "Curvature-Shaped Flow", obs, Sigma_c, D_mat, clearance))
-
-        rows_samples.append({
-            "state_id": sid,
-            "px": float(obs[0]),
-            "py": float(obs[1]),
-            "actions_vanilla": act_v,
-            "actions_curvature": act_c,
-            "Sigma_nominal": Sigma_nom,
-            "Sigma_safe": Sigma_safe,
-            "Sigma_robust": Sigma_robust,
-            "Sigma_vanilla": Sigma_v,
-            "Sigma_curvature": Sigma_c,
-            "clearance": clearance,
-            "D": D_mat,
-        })
-
-    header = list(rows[0].keys())
+    fieldnames = list(rows[0].keys())
     with open(outdir / "distribution_geometry.csv", "w", newline="") as f:
-        import csv
-
-        w = csv.DictWriter(f, fieldnames=header)
-        w.writeheader()
-        w.writerows(rows)
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
 
     np.savez(
         outdir / "distribution_geometry.npz",
         rows=np.array([str(r) for r in rows], dtype=object),
-        samples=np.array(rows_samples, dtype=object),
-        states=np.array(states, dtype=np.float32),
+        samples=np.array(sample_rows, dtype=object),
     )
-    with open(outdir / "distribution_geometry.json", "w") as f:
-        json.dump({
-            "num_states": int(args.num_states),
-            "num_action_samples": int(args.num_action_samples),
-            "rows": rows,
-        }, f, indent=2)
+    with open(outdir / "distribution_geometry.json", "w", encoding="utf-8") as f:
+        json.dump({"rows": rows}, f, indent=2)
 
 
 if __name__ == "__main__":
